@@ -1,0 +1,67 @@
+---
+title: "BIOSTAT 707 Checkpoint 1: cohort characterization and EDA"
+author: "Zahra Khan (zk57)"
+date: now
+format:
+  html:
+    embed-resources: true
+    toc: true
+engine: knitr
+execute:
+  echo: true
+  warning: false
+  error: false
+---
+
+# Checkpoint 1 
+
+
+```{r}
+#| label: setup
+#| message: false
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(ggplot2)
+})
+here::i_am("checkpoint1.qmd")
+data_dir <- here::here("data")
+out_dir  <- here::here("output")
+dir.create(out_dir, showWarnings = FALSE)
+expected_n <- 4000
+```
+
+```{r}
+#| label: check-data
+# Same check_set_a() as in the R-script variant, asserts data/set-a/ is in place.
+```
+
+```{r}
+#| label: load
+# Same load_set_a() as in the R-script variant, with stopifnot() on 4000 records.
+```
+
+## What exists at prediction time
+
+Prose. Two or three paragraphs.
+
+## Table 1
+
+```{r}
+#| label: table1
+# gtsummary::tbl_summary(...) by In-hospital_death
+```
+
+## Outcome summary
+
+## Missingness map
+
+```{r}
+#| label: missingness-map
+#| fig-width: 10
+#| fig-height: 7
+```
+
+## Is the missingness informative?
+
+Prose plus a table of death rate by "variable ever measured".
+
+## AI-use statement
