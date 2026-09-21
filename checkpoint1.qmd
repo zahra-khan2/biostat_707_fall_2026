@@ -208,7 +208,7 @@ This is further confirmed with the bar plot of labs within the first 48-hours sh
 #| echo: false
 #| message: false
 #| warning: false
-#| label: missing data  plots 1 
+#| label: missing-data-plots-1 
 
 # platelets  
 seta_long_full |>
@@ -249,7 +249,7 @@ ggsave(
 #| echo: false
 #| message: false
 #| warning: false
-#| label: missing data  plots 2
+#| label: missing-data-plots-2
 # cholesterol 
 grid <- seta_long_full |>
   filter(Parameter == "Cholesterol") |>
@@ -288,7 +288,7 @@ ggsave(
 #| echo: false
 #| message: false
 #| warning: false
-#| label: missing data  plots 3
+#| label: missing-data-plots-3
 grid <- seta_long_full |>
   filter(Parameter == "ALP") |>
   mutate(bin = floor(as.numeric(substr(Time, 1, 2)) / 4)) |>
@@ -323,7 +323,7 @@ ggsave(
 #| echo: false
 #| message: false
 #| warning: false
-#| label: missing data  plots 4
+#| label: missing-data-plots-4
 
 # utilizing code from lecture notes
 top_vars <- seta_long_full |> 
@@ -369,7 +369,7 @@ ggsave(
 #| echo: false
 #| message: false
 #| warning: false
-#| label: missing data  plots 5
+#| label: missing-data-plots-5
 n_adm <- seta_long_full |> distinct(RecordID) |> nrow() # getting distinct ID for each admission
 
 vars <- c("Platelets", "WBC", "RespRate", "MAP", "Glucose", "Lactate")
