@@ -226,18 +226,23 @@ row_order <- grid |>
 grid <- grid |>
   mutate(row = match(RecordID, row_order$RecordID))
 
-ggplot(grid, aes(bin + 0.5, row)) +
-  geom_tile(fill = "black") +
-  scale_x_continuous(
-    breaks = 0:11 + 0.5,
-    labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
-  ) +
-  labs(
-    x = "hours since admission (4-hour bins)",
-    y = "admissions, sorted by # bins with a Platelets Measure",
-    title = "Platelets: black = ≥1 measurement in the bin"
-  )
-ggsave(file.path(out_dir, "platelets_lasagna.png"))
+platelets_plot <- ggplot(grid, aes(bin + 0.5, row)) +
+    geom_tile(fill = "black") +
+    scale_x_continuous(
+      breaks = 0:11 + 0.5,
+      labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
+    ) +
+    labs(
+      x = "hours since admission (4-hour bins)",
+      y = "admissions, sorted by # bins with a Platelets Measure",
+      title = "Platelets: black = ≥1 measurement in the bin"
+    )
+platelets_plot
+ggsave(
+  filename = "grid_platelets.png",
+  plot = platelets_plot,
+  path = out_dir
+)
 ```
 
 ```{r}
@@ -258,18 +263,23 @@ row_order <- grid |>
 grid <- grid |>
   mutate(row = match(RecordID, row_order$RecordID))
 
-ggplot(grid, aes(bin + 0.5, row)) +
-  geom_tile(fill = "black") +
-  scale_x_continuous(
-    breaks = 0:11 + 0.5,
-    labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
-  ) +
-  labs(
-    x = "hours since admission (4-hour bins)",
-    y = "admissions, sorted by # bins with a cholesterol",
-    title = "Cholesterol: black = ≥1 measurement in the bin"
-  )
-ggsave(file.path(out_dir, "cholesterol_lasagna.png"))
+cholesterol_plot <- ggplot(grid, aes(bin + 0.5, row)) +
+    geom_tile(fill = "black") +
+    scale_x_continuous(
+      breaks = 0:11 + 0.5,
+      labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
+    ) +
+    labs(
+      x = "hours since admission (4-hour bins)",
+      y = "admissions, sorted by # bins with a cholesterol",
+      title = "Cholesterol: black = ≥1 measurement in the bin"
+    )
+cholesterol_plot
+ggsave(
+  filename = "grid_cholesterol.png",
+  plot = cholesterol_plot,
+  path = out_dir
+)
 ```
 
 
@@ -291,18 +301,23 @@ row_order <- grid |>
 grid <- grid |>
   mutate(row = match(RecordID, row_order$RecordID))
 
-ggplot(grid, aes(bin + 0.5, row)) +
-  geom_tile(fill = "black") +
-  scale_x_continuous(
-    breaks = 0:11 + 0.5,
-    labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
-  ) +
-  labs(
-    x = "hours since admission (4-hour bins)",
-    y = "admissions, sorted by # bins with a APL",
-    title = "APL: black = ≥1 measurement in the bin"
-  )
-ggsave(file.path(out_dir, "alp_lasagna.png"))
+alp_plot <- ggplot(grid, aes(bin + 0.5, row)) +
+    geom_tile(fill = "black") +
+    scale_x_continuous(
+      breaks = 0:11 + 0.5,
+      labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
+    ) +
+    labs(
+      x = "hours since admission (4-hour bins)",
+      y = "admissions, sorted by # bins with a APL",
+      title = "APL: black = ≥1 measurement in the bin"
+    )
+alp_plot
+ggsave(
+  filename = "grid_alp.png",
+  plot = alp_plot,
+  path = out_dir
+)
 ```
 ```{r}
 #| echo: false
@@ -317,14 +332,18 @@ top_vars <- seta_long_full |>
   slice_max(n, n = 15) |> 
   mutate(prop = n / (seta_long_full |> distinct(RecordID) |> nrow()))
 
-ggplot(top_vars, aes(prop, reorder(Parameter, prop))) +
-  geom_col(fill = "forestgreen") +
-  labs(x = sprintf("proportion of %d admissions with ≥1 measurement, first 48 h",
-                    seta_long_full |> distinct(RecordID) |> nrow()),
-       y = NULL,
-       title = "Top Variables Measured")
-
-ggsave(file.path(out_dir, "top_var_bar.png"))
+top_plot <- ggplot(top_vars, aes(prop, reorder(Parameter, prop))) +
+    geom_col(fill = "forestgreen") +
+    labs(x = sprintf("proportion of %d admissions with ≥1 measurement, first 48 h",
+                      seta_long_full |> distinct(RecordID) |> nrow()),
+         y = NULL,
+         title = "Top Variables Measured")
+top_plot
+ggsave(
+  filename = "top_var_plot.png",
+  plot = top_plot,
+  path = out_dir
+)
 
 bottom_vars <- seta_long_full |> 
   distinct(Parameter, RecordID) |> 
@@ -332,13 +351,19 @@ bottom_vars <- seta_long_full |>
   slice_min(n, n = 15) |> 
   mutate(prop = n / (seta_long_full |> distinct(RecordID) |> nrow()))
 
-ggplot(bottom_vars, aes(prop, reorder(Parameter, prop))) +
-  geom_col(fill = "cornflowerblue") +
-  labs(x = sprintf("proportion of %d admissions with ≥1 measurement, first 48 h",
-                    seta_long_full |> distinct(RecordID) |> nrow()),
-       y = NULL,
-       title = "Bottom Variables Measured")
-ggsave(file.path(out_dir, "bottom_var_bar.png"))
+bottom_plot <- ggplot(bottom_vars, aes(prop, reorder(Parameter, prop))) +
+    geom_col(fill = "cornflowerblue") +
+    labs(x = sprintf("proportion of %d admissions with ≥1 measurement, first 48 h",
+                      seta_long_full |> distinct(RecordID) |> nrow()),
+         y = NULL,
+         title = "Bottom Variables Measured")
+
+bottom_plot
+ggsave(
+  filename = "bottom_var_plot.png",
+  plot = bottom_plot,
+  path = out_dir
+)
 ```
 ```{r}
 #| echo: false
@@ -356,14 +381,20 @@ rate <- seta_long_full |>
   group_by(Parameter, bin) |> 
   summarize(f = n_distinct(RecordID) / n_adm, .groups = "drop")
 
-ggplot(rate, aes(bin * 6 + 3, f, color = Parameter)) +
-  geom_line() + geom_point(size = 1) +
-  scale_color_manual(values = c(Platelets = "forestgreen", WBC = "darkblue",
-                                 RespRate = "darkred", MAP = "pink2",
-                                 Glucose = "orange2", Lactate = "aquamarine2"),
-                      name = NULL) +
-  labs(x = "hours since admission", y = "fraction of admissions measured / 6 h")
-ggsave(file.path(out_dir, "measure_rate.png"))
+rate_plot <- ggplot(rate, aes(bin * 6 + 3, f, color = Parameter)) +
+    geom_line() + geom_point(size = 1) +
+    scale_color_manual(values = c(Platelets = "forestgreen", WBC = "darkblue",
+                                   RespRate = "darkred", MAP = "pink2",
+                                   Glucose = "orange2", Lactate = "aquamarine2"),
+                        name = NULL) +
+    labs(x = "hours since admission", y = "fraction of admissions measured / 6 h")
+
+rate_plot
+ggsave(
+  filename = "rate_plot.png",
+  plot = rate_plot,
+  path = out_dir
+)
 ```
 
 
@@ -473,7 +504,7 @@ table1 |>
 outcome_sum <- seta_wide_full |> 
     count(`In-hospital_death`) |> 
     mutate(pct = round((n / sum(n)) * 100, 1))
-outcome_sum
+
 # 2. Outcome summary         -> output/outcomes.csv
 outcome_sum_tab <- flextable(outcome_sum) |> 
   set_header_labels(
@@ -510,7 +541,7 @@ ggsave(
   filename = "missingness_map.png",
   plot = missingness_map,
   path = out_dir,
-  width = 10, height = 6, dpi = 300
+  width = 25, height = 12, dpi = 300
 )
 # 3. Missingness map         -> output/missingness_map.png
 # 4. Missingness as signal   -> output/missingness_vs_death.csv
