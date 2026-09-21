@@ -4,3 +4,4 @@ output/*
 .pixi/
 checkpoint1_files/
 .Rhistory
+.Rproj.user
