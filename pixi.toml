@@ -21,6 +21,9 @@ r-here = "*"
 r-readr = "*"
 python = "3.12.*"
 pandas = "*"
+r-tidyverse = ">=2.0.0,<3"
+r-flextable = ">=0.10.1,<0.11"
+r-gt = ">=1.3.0,<2"
 
 [tasks]
 checkpoint1 = "quarto render checkpoint1.qmd --output-dir output"
