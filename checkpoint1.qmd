@@ -17,10 +17,7 @@ execute:
 
 
 ```{r}
-#| echo: false
-#| include: false
 #| message: false
-#| warning: false
 #| label: setup
 
 # Had to add in library(data.table) to run "load" chunk
@@ -35,10 +32,6 @@ expected_n <- 4000
 ```
 
 ```{r}
-#| echo: false
-#| include: false
-#| message: false
-#| warning: false
 #| label: check-data
 # Same check_set_a() as in the R-script variant, asserts data/set-a/ is in place. 
 check_set_a <- function() {
@@ -55,7 +48,6 @@ check_set_a <- function() {
 
 ```{r}
 #| echo: false
-#| include: false
 #| message: false
 #| warning: false
 #| label: load
@@ -214,7 +206,6 @@ This is further confirmed with the bar plot of labs within the first 48-hours sh
 
 ```{r}
 #| echo: false
-#| results: 'hide'
 #| message: false
 #| warning: false
 #| label: missing data  plots 1 
@@ -246,12 +237,11 @@ ggplot(grid, aes(bin + 0.5, row)) +
     y = "admissions, sorted by # bins with a Platelets Measure",
     title = "Platelets: black = ≥1 measurement in the bin"
   )
-
+ggsave(file.path(out_dir, "platelets_lasagna.png"))
 ```
 
 ```{r}
 #| echo: false
-#| results: 'hide'
 #| message: false
 #| warning: false
 #| label: missing data  plots 2
@@ -279,13 +269,13 @@ ggplot(grid, aes(bin + 0.5, row)) +
     y = "admissions, sorted by # bins with a cholesterol",
     title = "Cholesterol: black = ≥1 measurement in the bin"
   )
+ggsave(file.path(out_dir, "cholesterol_lasagna.png"))
 ```
 
 
 
 ```{r}
 #| echo: false
-#| results: 'hide'
 #| message: false
 #| warning: false
 #| label: missing data  plots 3
@@ -312,10 +302,10 @@ ggplot(grid, aes(bin + 0.5, row)) +
     y = "admissions, sorted by # bins with a APL",
     title = "APL: black = ≥1 measurement in the bin"
   )
+ggsave(file.path(out_dir, "alp_lasagna.png"))
 ```
 ```{r}
 #| echo: false
-#| results: 'hide'
 #| message: false
 #| warning: false
 #| label: missing data  plots 4
@@ -333,7 +323,8 @@ ggplot(top_vars, aes(prop, reorder(Parameter, prop))) +
                     seta_long_full |> distinct(RecordID) |> nrow()),
        y = NULL,
        title = "Top Variables Measured")
-    
+
+ggsave(file.path(out_dir, "top_var_bar.png"))
 
 bottom_vars <- seta_long_full |> 
   distinct(Parameter, RecordID) |> 
@@ -347,10 +338,10 @@ ggplot(bottom_vars, aes(prop, reorder(Parameter, prop))) +
                     seta_long_full |> distinct(RecordID) |> nrow()),
        y = NULL,
        title = "Bottom Variables Measured")
+ggsave(file.path(out_dir, "bottom_var_bar.png"))
 ```
 ```{r}
 #| echo: false
-#| results: 'hide'
 #| message: false
 #| warning: false
 #| label: missing data  plots 5
@@ -372,6 +363,7 @@ ggplot(rate, aes(bin * 6 + 3, f, color = Parameter)) +
                                  Glucose = "orange2", Lactate = "aquamarine2"),
                       name = NULL) +
   labs(x = "hours since admission", y = "fraction of admissions measured / 6 h")
+ggsave(file.path(out_dir, "measure_rate.png"))
 ```
 
 
@@ -428,7 +420,6 @@ At this time, I choose to structure the ICU admission  within a single 48 hour t
 
 ```{r}
 #| echo: false
-#| output: false
 #| message: false
 #| warning: false
 #| label: table1
@@ -475,7 +466,6 @@ table1 |>
 
 ```{r}
 #| echo: false
-#| output: false
 #| message: false
 #| warning: false
 #| label: outcome-summary
@@ -499,7 +489,6 @@ fwrite(outcome_sum, here::here(out_dir, "outcomes.csv"))
 
 ```{r}
 #| echo: false
-#| output: false
 #| message: false
 #| warning: false
 #| label: missingness-map 
@@ -530,7 +519,6 @@ ggsave(
 
 ```{r}
 #| echo: false
-#| output: false
 #| message: false
 #| warning: false
 #| label: missingness as signal 
