@@ -17,6 +17,8 @@ execute:
 
 
 ```{r}
+#| echo: false
+#| warning: false
 #| message: false
 #| label: setup
 
@@ -32,6 +34,9 @@ expected_n <- 4000
 ```
 
 ```{r}
+#| echo: false
+#| message: false
+#| warning: false
 #| label: check-data
 # Same check_set_a() as in the R-script variant, asserts data/set-a/ is in place. 
 check_set_a <- function() {
