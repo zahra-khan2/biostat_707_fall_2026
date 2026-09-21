@@ -17,10 +17,15 @@ execute:
 
 
 ```{r}
-#| label: setup
+#| echo: false
+#| include: false
 #| message: false
+#| warning: false
+#| label: setup
+
+# Had to add in library(data.table) to run "load" chunk
 suppressPackageStartupMessages({
-  library(dplyr); library(tidyr); library(readr); library(ggplot2)
+  library(dplyr); library(tidyr); library(readr); library(ggplot2); library(data.table) ; library(gtsummary); library(visdat); library(tidyverse); library(flextable); library(gt)
 })
 here::i_am("checkpoint1.qmd")
 data_dir <- here::here("data")
@@ -30,38 +35,554 @@ expected_n <- 4000
 ```
 
 ```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
 #| label: check-data
-# Same check_set_a() as in the R-script variant, asserts data/set-a/ is in place.
+# Same check_set_a() as in the R-script variant, asserts data/set-a/ is in place. 
+check_set_a <- function() {
+  # data/set-a/ and data/Outcomes-a.txt must already be in place
+  stopifnot("data/Outcomes-a.txt is missing" =
+              file.exists(file.path(data_dir, "Outcomes-a.txt")))
+  n <- length(list.files(file.path(data_dir, "set-a"), pattern = "\\.txt$"))
+  stopifnot("data/set-a does not have 4000 records" = n == expected_n)
+}
+
+
+
 ```
 
 ```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
 #| label: load
 # Same load_set_a() as in the R-script variant, with stopifnot() on 4000 records.
+
+load_set_a <- function() {
+  files <- list.files(file.path(data_dir, "set-a"), full.names = TRUE)
+  raw <- rbindlist(lapply(files, function(f) {
+    d <- fread(f)
+    d[, RecordID := as.integer(tools::file_path_sans_ext(basename(f)))]
+    d
+  }))
+  static_vars <- c("Age", "Gender", "Height", "ICUType", "Weight")
+  static <- raw[Time == "00:00" & Parameter %in% static_vars] |>
+    dcast(RecordID ~ Parameter, value.var = "Value", fun.aggregate = first)
+  static[static == -1] <- NA            # -1 codes missing descriptors
+  ts <- raw[!Parameter %in% c(static_vars, "RecordID")]
+  list(ts = ts, static = static)
+}
+
+check_set_a()
+d <- load_set_a()
+outcomes <- fread(file.path(data_dir, "Outcomes-a.txt"))
+stopifnot(nrow(outcomes) == expected_n)
+
+
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: data wrangling
+
+# putting all the txt files (4000 of them) into a list
+files <- list.files(file.path(data_dir, "set-a"), full.names = TRUE)
+head(files) ## checking that I obtained the .txt files 
+
+# using fread within a loop to read through all txt files
+seta_list <- list() # initializing 
+
+for(i in seq_along(files)) {
+  seta_list[[i]] <- fread(files[i])
+}
+head(seta_list)
+
+# combine/join
+seta_long <- rbindlist(seta_list, use.names = TRUE, fill = FALSE, idcol = NULL, ignore.attr = FALSE)
+
+# adding file name and saving to output folder as a .csv
+
+fwrite(seta_long, file.path(out_dir, "set-a_long.csv"))
+```
+
+
+## Exploratory Analysis: Missingness and Extreme Values
+
+Assessing the set-a long data set alone there is no recorded NA values but within the coding of the actual data there exists some missing baseline values within gender, height, and recorded weight for some of the 4,000 patients. In the dataset these were coded as -1 and recoded to be counted as missing. Also, when examining the recorded values for various tests, vitals, and other measures in the EHR dataset some tests had some extreme/implausible values such as weight recorded as 0kg or a height of 30cm when the youngest individual was 15 years old. Looking across a summary of extreme maximum and minimum values for some variables a new range was constructed based upon online resources of what is considered plausible even in instances of abnormal test results which may indicate a health issue for a patient. Measures such ALP with a high value >2,000 (IU/L) I had found to be actual recorded values indicating concern but not concern of machine failure. Most of these adjustments to NA were based upon online resources to confirm whether such a range of minimum of 0 is plausible. 
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: exploratory analysis 
+
+# looking into unusual observations within each parameter
+data_extreme <- seta_long |>
+    group_by(Parameter) |>
+    summarise(
+      n = n(),
+      min_val = min(Value, na.rm = TRUE),
+      max_val = max(Value, na.rm = TRUE)
+  )
+
+# missingness based upon -1 as a marker for missingness -> adjusting these as NA
+missing_sum <- seta_long |> 
+  group_by(Parameter) |> 
+  summarise(
+    n = n(),
+    n_miss  = sum(Value == -1, na.rm = TRUE),
+    pct_miss = round((n_miss / n)*100, 2)
+  ) |> 
+  arrange(desc(n_miss))
+missing_sum
+
+
+# creating recordid column - had help from AI here
+# want to get admission/patient specific points 
+seta_long_adj <- seta_long |>
+  mutate(record = cumsum(Parameter == "RecordID")) |> # appoints internal record ID that will then lead to mapping real ID onto with the next line
+  group_by(record) |>
+  mutate(RecordID = Value[Parameter == "RecordID"][1]) |>
+  ungroup() 
+
+# summarizing AVG number of measures per RecordID
+# a lot of observations for DiasABP, HR, RespRate and more as expected
+count_tab <- seta_long_adj |> 
+  count(Parameter, RecordID) |> 
+  group_by(Parameter) |> 
+  summarise(AVG_Measures = round(mean(n), 2))
+count_tab
+```
+
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: variable adjustments 
+
+#### gender, height, weight -> hold all missingness in seta_long
+seta_long_na <- seta_long_adj |> 
+  mutate(
+    Value = if_else(
+      Parameter %in% c("Gender", "Weight", "Height") & Value == -1,
+      NA_real_, Value)) # setting the value of -1 to NA as the data site menions -1 as missing/unknown
+
+# based upon data_extreme we have some outliers of concern -> we will set those outside of possible observed values as NA 
+# extreme values exist elsewhere but are plausible, values here based upon what I googled
+
+seta_long_full <- seta_long_na |> 
+  mutate(Value = case_when(
+    Parameter == "pH"    & (Value < 6.5 | Value > 8) ~ NA_real_,
+    Parameter == "Temp"  & (Value < 25  | Value > 44) ~ NA_real_, 
+    Parameter == "DiasABP"    & Value == 0 ~ NA_real_,
+    Parameter == "SysABP"     & Value == 0 ~ NA_real_,
+    Parameter == "MAP"        & Value == 0 ~ NA_real_,
+    Parameter == "NIDiasABP"  & Value == 0 ~ NA_real_,
+    Parameter == "NISysABP"   & Value == 0 ~ NA_real_,
+    Parameter == "NIMAP"      & Value == 0 ~ NA_real_,
+    Parameter == "HR"    & (Value == 0  | Value > 250) ~ NA_real_,
+    Parameter == "K"     & Value > 12 ~ NA_real_,
+    Parameter == "PaCO2" & Value < 10 ~ NA_real_,
+    Parameter == "PaO2"  & Value == 0 ~ NA_real_,
+    Parameter == "Weight" & Value <= 30 ~ NA_real_,
+    Parameter == "Height" & (Value < 100 | Value > 250) ~ NA_real_,
+    TRUE ~ Value  
+  ))
+
+# checking for extreme again to ensure my code worked
+data_extreme_adj <- seta_long_full |>
+    group_by(Parameter) |>
+    summarise(
+      n = n(),
+      min_val = min(Value, na.rm = TRUE),
+      max_val = max(Value, na.rm = TRUE)
+  )
+data_extreme_adj
+```
+## Missingness Exploration 
+
+While examining the long formatted table there is a noticeable distinction between routine and risk based tests. Platelets is more of a routine-type measure with how many filled in bins are across observations and the 48-hour window while with cholesterol it becomes much more sparse after 8 hours from admission time.  
+This is further confirmed with the bar plot of labs within the first 48-hours showcasing in the second plot the lowest recorded labs within the time-window where cholesterol is second to last and where platelets sits up much higher. The measurement rate versus time since admission also supports this finding of routine measures versus non-routine, while also showing interesting patterns for other variables such as Respiratory Rate having a steady measurement rate until time hits 45 hours since admission. 
+
+```{r}
+#| echo: false
+#| results: 'hide'
+#| message: false
+#| warning: false
+#| label: missing data  plots 1 
+
+# platelets  
+seta_long_full |>
+  summarise(n_records = n_distinct(record)) # data check: contains 4000 IDs 
+# adjusted from lecture notes
+grid <- seta_long_full |>
+  filter(Parameter == "Platelets") |>
+  mutate(bin = floor(as.numeric(substr(Time, 1, 2)) / 4)) |> # needed help from AI here
+  distinct(RecordID, bin)
+
+row_order <- grid |>
+  count(RecordID) |>
+  arrange(n)
+
+grid <- grid |>
+  mutate(row = match(RecordID, row_order$RecordID))
+
+ggplot(grid, aes(bin + 0.5, row)) +
+  geom_tile(fill = "black") +
+  scale_x_continuous(
+    breaks = 0:11 + 0.5,
+    labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
+  ) +
+  labs(
+    x = "hours since admission (4-hour bins)",
+    y = "admissions, sorted by # bins with a Platelets Measure",
+    title = "Platelets: black = ≥1 measurement in the bin"
+  )
+
+```
+
+```{r}
+#| echo: false
+#| results: 'hide'
+#| message: false
+#| warning: false
+#| label: missing data  plots 2
+# cholesterol 
+grid <- seta_long_full |>
+  filter(Parameter == "Cholesterol") |>
+  mutate(bin = floor(as.numeric(substr(Time, 1, 2)) / 4)) |>
+  distinct(RecordID, bin)
+
+row_order <- grid |>
+  count(RecordID) |>
+  arrange(n)
+
+grid <- grid |>
+  mutate(row = match(RecordID, row_order$RecordID))
+
+ggplot(grid, aes(bin + 0.5, row)) +
+  geom_tile(fill = "black") +
+  scale_x_continuous(
+    breaks = 0:11 + 0.5,
+    labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
+  ) +
+  labs(
+    x = "hours since admission (4-hour bins)",
+    y = "admissions, sorted by # bins with a cholesterol",
+    title = "Cholesterol: black = ≥1 measurement in the bin"
+  )
+```
+
+
+
+```{r}
+#| echo: false
+#| results: 'hide'
+#| message: false
+#| warning: false
+#| label: missing data  plots 3
+grid <- seta_long_full |>
+  filter(Parameter == "ALP") |>
+  mutate(bin = floor(as.numeric(substr(Time, 1, 2)) / 4)) |>
+  distinct(RecordID, bin)
+
+row_order <- grid |>
+  count(RecordID) |>
+  arrange(n)
+
+grid <- grid |>
+  mutate(row = match(RecordID, row_order$RecordID))
+
+ggplot(grid, aes(bin + 0.5, row)) +
+  geom_tile(fill = "black") +
+  scale_x_continuous(
+    breaks = 0:11 + 0.5,
+    labels = sprintf("%d-%d", 4 * 0:11, 4 * 0:11 + 4)
+  ) +
+  labs(
+    x = "hours since admission (4-hour bins)",
+    y = "admissions, sorted by # bins with a APL",
+    title = "APL: black = ≥1 measurement in the bin"
+  )
+```
+```{r}
+#| echo: false
+#| results: 'hide'
+#| message: false
+#| warning: false
+#| label: missing data  plots 4
+
+# utilizing code from lecture notes
+top_vars <- seta_long_full |> 
+  distinct(Parameter, RecordID) |> 
+  count(Parameter) |> 
+  slice_max(n, n = 15) |> 
+  mutate(prop = n / (seta_long_full |> distinct(RecordID) |> nrow()))
+
+ggplot(top_vars, aes(prop, reorder(Parameter, prop))) +
+  geom_col(fill = "forestgreen") +
+  labs(x = sprintf("proportion of %d admissions with ≥1 measurement, first 48 h",
+                    seta_long_full |> distinct(RecordID) |> nrow()),
+       y = NULL,
+       title = "Top Variables Measured")
+    
+
+bottom_vars <- seta_long_full |> 
+  distinct(Parameter, RecordID) |> 
+  count(Parameter) |> 
+  slice_min(n, n = 15) |> 
+  mutate(prop = n / (seta_long_full |> distinct(RecordID) |> nrow()))
+
+ggplot(bottom_vars, aes(prop, reorder(Parameter, prop))) +
+  geom_col(fill = "cornflowerblue") +
+  labs(x = sprintf("proportion of %d admissions with ≥1 measurement, first 48 h",
+                    seta_long_full |> distinct(RecordID) |> nrow()),
+       y = NULL,
+       title = "Bottom Variables Measured")
+```
+```{r}
+#| echo: false
+#| results: 'hide'
+#| message: false
+#| warning: false
+#| label: missing data  plots 5
+n_adm <- seta_long_full |> distinct(RecordID) |> nrow() # getting distinct ID for each admission
+
+vars <- c("Platelets", "WBC", "RespRate", "MAP", "Glucose", "Lactate")
+
+rate <- seta_long_full |> 
+  mutate(Time_hr = as.numeric(substr(Time, 1, 2))) |> 
+  filter(Parameter %in% vars, between(Time_hr, 0, 48)) |> 
+  mutate(bin = floor(Time_hr / 6)) |> 
+  group_by(Parameter, bin) |> 
+  summarize(f = n_distinct(RecordID) / n_adm, .groups = "drop")
+
+ggplot(rate, aes(bin * 6 + 3, f, color = Parameter)) +
+  geom_line() + geom_point(size = 1) +
+  scale_color_manual(values = c(Platelets = "forestgreen", WBC = "darkblue",
+                                 RespRate = "darkred", MAP = "pink2",
+                                 Glucose = "orange2", Lactate = "aquamarine2"),
+                      name = NULL) +
+  labs(x = "hours since admission", y = "fraction of admissions measured / 6 h")
+```
+
+
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: Wider Table
+
+seta_wide <- seta_long_full |> 
+  filter(Parameter != "RecordID") |> 
+  mutate(Time = as.numeric(substr(Time, 1, 2)) + # needed help from AI on time format issues 
+                as.numeric(substr(Time, 4, 5)) / 60) |> 
+  summarise(
+    mean  = mean(Value, na.rm = TRUE),
+    min   = suppressWarnings(min(Value, na.rm = TRUE)), # added on supresswarnings from AI, kept getting odd results/errors
+    max   = suppressWarnings(max(Value, na.rm = TRUE)),
+    count = sum(!is.na(Value)),
+    first = first(Value, na_rm = TRUE),
+    last  = last(Value, na_rm = TRUE),
+    .by = c(RecordID, Parameter)
+  ) |> 
+  pivot_wider(
+    names_from = Parameter,
+    values_from = c(mean, min, max, count, first, last),
+    names_glue = "{Parameter}_{.value}" #formatting here from AI
+  )
+
+head(seta_wide)
+# have some inf and NaN that need to be fixed
+seta_wide <- seta_wide |> 
+  mutate(across(where(is.numeric), 
+                ~ if_else(is.infinite(.) | is.nan(.), NA_real_, .)))
+head(seta_wide)
+
+# joining to outcomes a txt file
+seta_wide_full <- seta_wide |> 
+  left_join(outcomes, by = "RecordID")
+seta_wide_full # -1 in Surival indicates survival not missing 
+
+# saving csv file
+fwrite(seta_wide_full, file.path(out_dir, "set-a_wide.csv"))
 ```
 
 ## What exists at prediction time
 
-Prose. Two or three paragraphs.
+For future model fitting, the prediction window will be within this 48 hour section to predict survival outcomes (death) for patients admitted into the ICU. Looking at the variables collected at admission we have variables that descriptive mostly of the individual height, weight, age, gender, and ICUtype (assuming this is not repeated) which sets a baseline in which we do not expect any changes from unless from any data errors inn the 48 hours. Alongside these variables we are also working with laboratory test measures which vary in occurrence. Early exploratory analysis showcases a great range in total counts for each test with cholesterol have notably fewer measure (~300) while others well exceed beyond 4,000 measures easily. This distinction makes us aware that at time = 0 what exists and whether that will change or remain static, things such as gender, age, weight, and height, should remain steady and not observed at other time points. 
+
+At this time, I choose to structure the ICU admission  within a single 48 hour time window versus splitting up the time by two segments of 24 hours. Patient data will summarized by one row per individual with counts of a measure recorded, min, max, first and last values as well as overall mean of the measure which will be used within the prediction model in the future. This keeps the structure more easy for myself at the moment as I get familiarized with the data and collapse patient information/test results into one statistic but if I were to want further information on variation which may have been lost due to my method of structuring the data, I can restructure the data to have two rows per patient based on the first segment of 24 hours then the next, or some other way that captures a change in condition in a 48 hour window which the current structure of my prediction window does not have. 
 
 ## Table 1
 
 ```{r}
+#| echo: false
+#| output: false
+#| message: false
+#| warning: false
 #| label: table1
 # gtsummary::tbl_summary(...) by In-hospital_death
+# plan to stratify by two different time windows first 24 hrs then second 24hrs 
+
+# 1. Table 1 -> output/table1.csv  (or .html from gtsummary)
+
+
+table1 <- seta_wide_full |> 
+    select(`In-hospital_death`, Age_mean, Gender_mean, ICUType_mean, 
+           Weight_mean, Height_mean, `SAPS-I`, SOFA,
+           HR_mean, Platelets_mean, RespRate_mean, WBC_mean, Temp_mean, pH_mean) |> 
+    mutate(`In-hospital_death` = factor(`In-hospital_death`, 
+                                         labels = c("Survived", "Died"))) |> 
+    tbl_summary(
+      by = `In-hospital_death`,
+      label = list(
+        Age_mean        ~ "Age (years)",
+        Gender_mean     ~ "Gender",
+        ICUType_mean    ~ "ICU Type",
+        Weight_mean     ~ "Weight (kg)",
+        Height_mean     ~ "Height (cm)",
+        `SAPS-I`        ~ "SAPS-I Score",
+        SOFA            ~ "SOFA Score",
+        HR_mean         ~ "Heart Rate (bpm)",
+        Platelets_mean  ~ "Platelets (cells/nL)",
+        RespRate_mean   ~ "Respiratory Rate (bpm)",
+        WBC_mean        ~ "WBC (cells/nL)",
+        Temp_mean       ~ "Temperature (°C)",
+        pH_mean         ~ "Arterial pH"
+      ),
+      missing = "no"
+    ) 
+table1
+  
+table1 |> 
+  as_gt() |> 
+  gtsave(filename = "table1.html", path = out_dir)
 ```
 
 ## Outcome summary
 
+
+```{r}
+#| echo: false
+#| output: false
+#| message: false
+#| warning: false
+#| label: outcome-summary
+
+outcome_sum <- seta_wide_full |> 
+    count(`In-hospital_death`) |> 
+    mutate(pct = round((n / sum(n)) * 100, 1))
+outcome_sum
+# 2. Outcome summary         -> output/outcomes.csv
+outcome_sum_tab <- flextable(outcome_sum) |> 
+  set_header_labels(
+    `In-hospital_death` = "Hospital Death",
+    n = "Count",
+    pct = "%"
+  )
+outcome_sum_tab
+fwrite(outcome_sum, here::here(out_dir, "outcomes.csv"))
+```
+
 ## Missingness map
 
 ```{r}
-#| label: missingness-map
-#| fig-width: 10
-#| fig-height: 7
+#| echo: false
+#| output: false
+#| message: false
+#| warning: false
+#| label: missingness-map 
+#| fig-width: 25
+#| fig-height: 12
+# using only mean of each variable measured
+
+missingness_map <- seta_wide_full |> 
+    select(ends_with("_mean")) |> 
+    rename_with(~ str_remove(., "_mean")) |>
+    vis_miss() +
+    theme(
+      axis.text.x = element_text(angle = 40, hjust = 1, size = 7),
+      axis.text.y = element_blank(),   # patient IDs on y-axis are unreadable/unnecessary anyway
+      axis.ticks.y = element_blank()
+    )
+missingness_map
+ggsave(
+  filename = "missingness_map.png",
+  plot = missingness_map,
+  path = out_dir,
+  width = 10, height = 6, dpi = 300
+)
+# 3. Missingness map         -> output/missingness_map.png
+# 4. Missingness as signal   -> output/missingness_vs_death.csv
+
+```
+
+```{r}
+#| echo: false
+#| output: false
+#| message: false
+#| warning: false
+#| label: missingness as signal 
+
+# AI was utilized with the structure of this pipe set up 
+all_count_vars <- seta_wide_full |> 
+  select(ends_with("_count")) |> 
+  names()
+
+informative_tab <- seta_wide_full |> 
+  select(`In-hospital_death`, all_of(all_count_vars)) |> 
+  pivot_longer(cols = all_of(all_count_vars), names_to = "variable", values_to = "count") |> 
+  mutate(
+    count = replace_na(count, 0),
+    measured_status = if_else(count > 0, "Measured", "Never measured"),
+    variable = str_remove(variable, "_count")
+  ) |> 
+  summarise(
+    n = n(),
+    death_rate = round(mean(`In-hospital_death` == 1, na.rm = TRUE) * 100, 1),
+    .by = c(variable, measured_status)
+  ) |> 
+  arrange(variable, measured_status)
+
+# flex table, to make a nice looking output
+miss_inform <- flextable(informative_tab) |> 
+  set_header_labels(
+    variable = "Variable",
+    measured_status = "Ever Measured?",
+    n = "Count",
+    death_rate = "Death Rate (%)"
+  ) |> 
+  autofit()
+miss_inform # flex table can't be saved as csv but the dataframe can! 
+write_csv(informative_tab, file.path(out_dir, "missingness_vs_death.csv"))
 ```
 
 ## Is the missingness informative?
 
-Prose plus a table of death rate by "variable ever measured".
+Looking at each variables summarized across all 4,000 patients within the 48 hour window it seems that missingness is informative or that what is observed is informative. The higher amount of "Never Measured" typically across this table to lower death rate while higher death rate % is found for those measured.From our initial data exploration we examined cholesterol and how among other labs within the 48 hours it had a relatively lower count of measures indicating it is more of a risk dependent variable which is mostly measured not for routine but when concern for patients health requires such a test, so it makes sense why those who had cholesterol taken, 15.1% of those had death as their outcome, however those who did not get cholesterol measured still had a close death rate of 13.7%, but the difference exists. 
+
+Similarly in our missingness map, our nullity matrix, we can see how this table signaling missingness supports the visual counter part such that variables that showcase higher death rate %  when measured have much more more missingness present across the data set because these observations are taken in specific cases, not routinely but when a patients life is at risk which leads to the need for specific tests to narrow down the cause for a patients presenting symptoms and those cases either status may be more severe. Conversely, Platelets does not inform us much about death outcomes such that it is a routine measure with 2% missing like Troponin but among those who had platelets measured the rate of death was higher than those who did not get their platelets measured indicating a less severe status. Based upon our exploratory analysis, outcome summary, and missingness examination the outcome death and predicting it in a future model is plausible with 500+ individuals with recorded death and variables fixed at the beginning of the prediction window and varying measures, which for this model we will use an overall summary of labs for prediction. Once we complete our prediction model we will be interested in sensitivity and specificity, essentially trying to assess how well our model performed in correctly identifying those who passed away being flagged or predicted with death outcome and overall for all those marked for death, how many actually had the outcome. In some instances we may be more concerned with a model that groups more individual at risk such as including those who may not have the outcome or wanting to more specifically obtain just those who are going to have the outcome, specificity. 
+
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+message("Checkpoint 1 complete. See output/.")
+```
 
 ## AI-use statement
+
+AI was utilized in the production of this checkpoint assignment (Claude) mostly for debugging in sections where I was struggling to graph missingness based upon in-class plots using our set-a long data. Mostly errors of formatting and time issues. AI was also used to give more adjustments visually for plots and structuring of dataframes when my original data frame would not run. The use of AI was helpful in providing a rough outline in which I could easily fill in with structures I wanted and also clear up misunderstandings in outcomes I wanted summarized such as for the missingness as a signal trying to structure the code so that I could see overall death rate by each variable the difference in survival between measured tests and non-measured tests, which required a pivot which I did not realize and structuring with stringr to make the outcome look nicer. AI was not used in any of my writing or interpretations of the data set, summaries or plots. All of the text is in my own words.  
