@@ -27,3 +27,4 @@ r-gt = ">=1.3.0,<2"
 
 [tasks]
 checkpoint1 = "quarto render checkpoint1.qmd --output-dir output"
+checkpoint2 = "quarto render checkpoint2.qmd --output-dir output"
