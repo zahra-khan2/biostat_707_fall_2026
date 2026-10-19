@@ -234,6 +234,7 @@ seta_wide_full1 <- bind_cols(seta_wide_full1, missing_flags)
 ```
 ## Introduction 
 
+For this predictive modeling analysis the dataset from set-a, after converting the original long dataset into a wide dataset, will contain one row per patient admitted into the ICU over a 48 hour period. In each row we have basic demographic information given at time of admission followed by test measures taken in the 48 hour period, this includes the mean value of the test (e.g. Temperature, Heart Rate, Platelet Count, etc.), minimum value, maximum value, first recorded, last recorded and total number of times a test was take during the patients admission time. We are interested in building models to predict death and based upon these test measures and demographic information which of three models we plan to fit best predict the outcome of death on data from the firs 48 hours of being admitted into the ICU. There is a total 4,000 stays, indicating 4,000 patients, with result of 554 (13.9%) patients with the outcome of death.
 
 ```{r}
 #| echo: false
@@ -255,9 +256,6 @@ dat_summary_ft
 
 save_as_html(dat_summary_ft, path = file.path(out_dir, "hospital_outcome_summary.html"))
 ```
-
-
-For this predictive modeling analysis the dataset from set-a, after converting the original long dataset into a wide dataset, will contain one row per patient admitted into the ICU over a 48 hour period. In each row we have basic demographic information given at time of admission followed by test measures taken in the 48 hour period, this includes the mean value of the test (e.g. Temperature, Heart Rate, Platelet Count, etc.), minimum value, maximum value, first recorded, last recorded and total number of times a test was take during the patients admission time. We are interested in building models to predict death and based upon these test measures and demographic information which of three models we plan to fit best predict the outcome of death on data from the firs 48 hours of being admitted into the ICU. There is a total 4,000 stays, indicating 4,000 patients, with result of 554 (13.9%) patients with the outcome of death. 
 
 #### Data Cleaning Procedures 
 
