@@ -1,0 +1,952 @@
+---
+title: "BIOSTAT 707 Checkpoint 2: building and comparing models on set-a"
+author: "Zahra Khan (zk57)"
+date: now
+format:
+  html:
+    embed-resources: true
+    toc: true
+engine: knitr
+execute:
+  echo: true
+  warning: false
+  error: false
+---
+# Checkpoint 2 
+
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: Setup 
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(ggplot2); library(data.table) ; library(gtsummary); library(visdat); library(tidyverse); library(flextable); library(gt); library(tidymodels); library(skimr); library(yardstick)
+})
+here::i_am("checkpoint2.qmd")
+data_dir <- here::here("data")
+out_dir  <- here::here("output")
+dir.create(out_dir, showWarnings = FALSE)
+expected_n <- 4000
+# code loading
+check_set_a <- function() {
+  # data/set-a/ and data/Outcomes-a.txt must already be in place
+  stopifnot("data/Outcomes-a.txt is missing" =
+              file.exists(file.path(data_dir, "Outcomes-a.txt")))
+  n <- length(list.files(file.path(data_dir, "set-a"), pattern = "\\.txt$"))
+  stopifnot("data/set-a does not have 4000 records" = n == expected_n)
+}
+
+# I will re-create and re-clean my data I put into my wide table from check point 1 
+outcomes <- fread(file.path(data_dir, "Outcomes-a.txt"))
+stopifnot(nrow(outcomes) == expected_n)
+
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: checkpt1_data_setup
+# putting all the txt files (4000 of them) into a list
+files <- list.files(file.path(data_dir, "set-a"), full.names = TRUE)
+head(files) ## checking that I obtained the .txt files 
+
+# using fread within a loop to read through all txt files
+seta_list <- list() # initializing 
+
+for(i in seq_along(files)) {
+  seta_list[[i]] <- fread(files[i])
+}
+head(seta_list)
+
+# combine/join
+seta_long <- rbindlist(seta_list, use.names = TRUE, fill = FALSE, idcol = NULL, ignore.attr = FALSE)
+
+# adding file name and saving to output folder as a .csv
+
+fwrite(seta_long, file.path(out_dir, "set-a_long.csv"))
+```
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: chekpt1_data_cleaning
+
+seta_long_adj <- seta_long |>
+  mutate(record = cumsum(Parameter == "RecordID")) |> # appoints internal record ID that will then lead to mapping real ID onto with the next line
+  group_by(record) |>
+  mutate(RecordID = Value[Parameter == "RecordID"][1]) |>
+  ungroup() 
+
+#### gender, height, weight -> hold all missingness in seta_long
+seta_long_na <- seta_long_adj |> 
+  mutate(
+    Value = if_else(
+      Parameter %in% c("Gender", "Weight", "Height") & Value == -1,
+      NA_real_, Value)) # setting the value of -1 to NA as the data site menions -1 as missing/unknown
+
+# based upon data_extreme we have some outliers of concern -> we will set those outside of possible observed values as NA 
+# extreme values exist elsewhere but are plausible, values here based upon what I googled
+
+seta_long_full <- seta_long_na |> 
+  mutate(Value = case_when(
+    Parameter == "pH"    & (Value < 6.5 | Value > 8) ~ NA_real_,
+    Parameter == "Temp"  & (Value < 25  | Value > 44) ~ NA_real_, 
+    Parameter == "DiasABP"    & Value == 0 ~ NA_real_,
+    Parameter == "SysABP"     & Value == 0 ~ NA_real_,
+    Parameter == "MAP"        & Value == 0 ~ NA_real_,
+    Parameter == "NIDiasABP"  & Value == 0 ~ NA_real_,
+    Parameter == "NISysABP"   & Value == 0 ~ NA_real_,
+    Parameter == "NIMAP"      & Value == 0 ~ NA_real_,
+    Parameter == "HR"    & (Value == 0  | Value > 250) ~ NA_real_,
+    Parameter == "K"     & Value > 12 ~ NA_real_,
+    Parameter == "PaCO2" & Value < 10 ~ NA_real_,
+    Parameter == "PaO2"  & Value == 0 ~ NA_real_,
+    Parameter == "Weight" & Value <= 30 ~ NA_real_,
+    Parameter == "Height" & (Value < 100 | Value > 250) ~ NA_real_,
+    TRUE ~ Value  
+  ))
+
+# checking for extreme again to ensure my code worked
+data_extreme_adj <- seta_long_full |>
+    group_by(Parameter) |>
+    summarise(
+      n = n(),
+      min_val = min(Value, na.rm = TRUE),
+      max_val = max(Value, na.rm = TRUE)
+  )
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: checkpt1_wide_tab_setup
+
+seta_wide <- seta_long_full |> 
+  filter(Parameter != "RecordID") |> 
+  mutate(Time = as.numeric(substr(Time, 1, 2)) + # needed help from AI on time format issues 
+                as.numeric(substr(Time, 4, 5)) / 60) |> 
+  summarise(
+    mean  = mean(Value, na.rm = TRUE),
+    min   = suppressWarnings(min(Value, na.rm = TRUE)), # added on supresswarnings from AI, kept getting odd results/errors
+    max   = suppressWarnings(max(Value, na.rm = TRUE)),
+    count = sum(!is.na(Value)),
+    first = dplyr::first(Value, na_rm = TRUE),
+    last  = dplyr::last(Value, na_rm = TRUE),
+    .by = c(RecordID, Parameter)
+  ) |> 
+  pivot_wider(
+    names_from = Parameter,
+    values_from = c(mean, min, max, count, first, last),
+    names_glue = "{Parameter}_{.value}", #formatting here from AI
+    values_fill = list(count = 0) # filling in NAs to 0 to showcase missingness (for when a patietn did not get a certain test at all)
+  )
+
+head(seta_wide)
+# have some inf and NaN that need to be fixed
+seta_wide <- seta_wide |> 
+  mutate(across(where(is.numeric), 
+                ~ if_else(is.infinite(.) | is.nan(.), NA_real_, .)))
+head(seta_wide)
+
+# joining to outcomes a txt file
+seta_wide_full <- seta_wide |> 
+  left_join(outcomes, by = "RecordID")
+seta_wide_full # -1 in Surival indicates survival not missing 
+# found missing -1 in my plot so need to address this now:
+seta_wide_full <- seta_wide_full |>
+  mutate(across(c(`SAPS-I`, SOFA), ~ if_else(.x == -1, NA_real_, .x)))
+# saving csv file
+fwrite(seta_wide_full, file.path(out_dir, "set-a_wide.csv"))
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: wide_data_skim
+# looking at data df 
+head(data)
+overview_wide_dat<- skim(seta_wide_full)
+```
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: seta_wide_cleaning_1
+
+# keeping only "_first" columns for the demogprhaic variables for ease and to remove uneeded variables, will keep count only besides first.
+seta_wide_full <- seta_wide_full |>
+  select(-matches("^(Age|Gender|Height|Weight|ICUType)_(mean|min|max|last)$"), # syntax obtained from AI
+         -matches("^(Age|ICUType)_count$")) |>
+  rename(Age     = Age_first,
+         Gender  = Gender_first,
+         Height  = Height_first,
+         Weight  = Weight_first,
+         ICUType = ICUType_first) |>
+  mutate(
+    Gender  = factor(Gender, levels = c(0, 1), labels = c("Female", "Male")),
+    ICUType = factor(ICUType, levels = 1:4,
+                     labels = c("Coronary Care Unit", "Cardiac Surgery Recovery Unit",
+                                "Medical ICU", "Surgical ICU")),
+    death = factor(`In-hospital_death`, levels = c(1, 0))
+  ) 
+seta_wide_full1 <- seta_wide_full |> 
+  select(-`In-hospital_death`, -Survival, -Length_of_stay, -`SAPS-I`, -SOFA)
+# moving these demographic columns up front.
+seta_wide_full1 <- seta_wide_full1 |>
+  relocate(RecordID, Age, Gender, Height, Weight, ICUType, death,
+           Height_count, Weight_count, Gender_count)
+```
+
+
+
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: Missing_indicator
+suffixes <- c("mean", "min", "max", "count", "first", "last")   
+pattern  <- paste0("_(", paste(suffixes, collapse = "|"), ")$")
+
+vars <- unique(sub(pattern, "", names(seta_wide_full1)))
+
+# missingness indicator based upon whether Count = 0 for that test/demogrpahic values 
+count_cols <- grep("_count$", names(seta_wide_full1), value = TRUE)
+
+missing_flags <- seta_wide_full1 |>
+  select(all_of(count_cols)) |>
+  mutate(across(everything(), ~ as.integer(.x == 0))) |>
+  rename_with(~ sub("_count$", "_missing", .x))
+
+seta_wide_full1 <- bind_cols(seta_wide_full1, missing_flags)
+
+```
+## Introduction 
+
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: outcome_summary
+# summary of data 
+dat_summary <- seta_wide_full1 |>
+  mutate(death = if_else(death == 1, "died", "survived")) |>
+  count(death, name = "n") |>
+  mutate(pct = round(n / sum(n) * 100, 1))
+
+dat_summary_ft <- flextable(dat_summary) |>
+  set_header_labels(death = "Outcome", n = "N", pct = "%") |>
+  set_caption("Table 1: In-hospital death (4,000 ICU stays)") |>
+  autofit()
+
+dat_summary_ft
+
+save_as_html(dat_summary_ft, path = file.path(out_dir, "hospital_outcome_summary.html"))
+```
+
+
+For this predictive modeling analysis the dataset from set-a, after converting the original long dataset into a wide dataset, will contain one row per patient admitted into the ICU over a 48 hour period. In each row we have basic demographic information given at time of admission followed by test measures taken in the 48 hour period, this includes the mean value of the test (e.g. Temperature, Heart Rate, Platelet Count, etc.), minimum value, maximum value, first recorded, last recorded and total number of times a test was take during the patients admission time. We are interested in building models to predict death and based upon these test measures and demographic information which of three models we plan to fit best predict the outcome of death on data from the firs 48 hours of being admitted into the ICU. There is a total 4,000 stays, indicating 4,000 patients, with result of 554 (13.9%) patients with the outcome of death. 
+
+#### Data Cleaning Procedures 
+
+Based upon earlier work with the set-a long dataset the same cleaning conventions will be upheld. Abnormal values for height, weight, pH, Potassium (K), HR, PaCO2, and PaO2 have been adjusted for by setting ranges based on information obtained from online. As to not remove potential informative values for the outcome hospital death, other extreme high values were not corrected for. Values set at 0 for DiasABP, SysABP, MAP, NIDiasABP, NISysABP, and NIMAP were adjusted to be NA as to account for potential machine error. In the outcomes dataset, SAPS-1 and SOFA were adjusted for missing values initially set at -1 now set as NA which has now been corrected in this checkpoint. Other issues of machine error or too extreme values are not accounted for due to unknown domain knowledge, which may lead to misleading results. 
+
+Additional to these cleaning steps in our final wide data set our prediction data set in which we will build our cross validation code, variables outside of the prediction window will be removed from the data set such as Length_of_stay and Survival. SAPS-I and SOFA will also be removed as these are benchmark variables not predictors, but will be kept cleaned aside from the training data for later evaluation for model selection. To adjust the final prediction model we will only keep the first recorded measure of demographic values such as Age,Gender, Height, and Weight treating these as variables measured at baseline (ICUType will also be kept from first value recorded). 
+
+No variables will be selected or dropped except for additional and unneeded demographic columns as addressed beforehand. 
+
+#### Missingness Indicators 
+
+Missingness indicators will be kept for all variables tests where in at least one row for one patient a count of that test is equal to 0. This has been accounted for prior to the cross validation code. 
+
+#### Table 2a & 2b. Predictors for Model 
+##### Table 2a.Demographic Variables 
+
+For these demographic variables the following type of data has been kept:
+- First value recorded (for all demographic variables)
+- Count: Only for Gender, Height, and Weight
+
+| Variable Name | Unit |
+|:---|:---|
+| Age | years |
+| Gender | 0: female, 1: male |
+| Height | cm |
+| Weight | kg |
+| ICUType | 1: Coronary Care Unit, 2: Cardiac Surgery Recovery Unit, 3: Medical ICU, 4: Surgical ICU |
+
+
+##### Table 2b. Additional Variables
+
+For the remaining non-demographic variables in the data set, while also excluding variables outside the prediction window, the following summaries for each unique variable will be kept:
+
+- Minimum: These predictors can be informative where a low recorded value of a measure can indicate poor prognosis which can be informative to our outcome.
+- Maximum: Similarly, to above, these variables indicate extreme values of a test for individuals and allows us to see potential extreme cases that may be predictive of the outcome death. 
+- Mean: Mean values were kept for all predictors, no specific domain knowledge why but to maintain good data practice and avoid leakage. Good potentially be informative.
+- Count of measure between 0-48 hours: Can be informative such as high numbers of a test that is only done at a risk basis may indicate poor prognosis and predictive of the outcome death. 
+- First: Can highlight potential first status which may severe in an ICU setting which may be predictive of the outcome death. 
+- Last: Similar to above, this last value can highlight potential last status of a measure for a patient which may be able to be predictive of the outcome death. 
+
+| Variable Name | Unit |
+|:---|:---|
+| Albumin | g/dL |
+| ALP | IU/L |
+| ALT | IU/L |
+| AST | IU/L |
+| Bilirubin | mg/dL |
+| BUN | mg/dL |
+| Cholesterol | mg/dL |
+| Creatinine | mg/dL |
+| DiasABP | mmHg |
+| FiO2 | 0–1 |
+| GCS | 3–15 |
+| Glucose | mg/dL |
+| HCO3 | mmol/L |
+| HCT | % |
+| HR | bpm |
+| K | mEq/L |
+| Lactate | mmol/L |
+| Mg | mmol/L |
+| MAP | mmHg |
+| MechVent | 0: false, 1: true |
+| Na | mEq/L |
+| NIDiasABP | mmHg |
+| NIMAP | mmHg |
+| NISysABP | mmHg |
+| PaCO2 | mmHg |
+| PaO2 | mmHg |
+| pH | 0–14 |
+| Platelets | cells/nL |
+| RespRate | bpm |
+| SaO2 | % |
+| SysABP | mmHg |
+| Temp | °C |
+| TropI | μg/L |
+| TropT | μg/L |
+| Urine | mL |
+| WBC | cells/nL |
+
+
+
+## Model 1: regularized logistic regression
+
+For our first model of interest to predict the outcome of in-hospital death utilizing ICU data over the span of 48 hours, we are interested in utilizing a logistic regression model. In this nested cross validation set up, to tune hyper parameter within the inner loops, elastic net was chosen as the penalty of choice. For this large data set with over 200 predictors we are still interested in keeping a good amount of these predictors and not shrink them all fully down to 0 but use a more balanced method rather than LASSO. The variables LASSO selects is highly dependent on the training data and thus when two predictors (lets say) are highly correlated LASSO will zero one out mainly based upon training data, the reference, not so much on predictive power. Additionally some variables coefficient should be removed which ridge regression would not allow, as it shrinks coefficients down close to 0 but does not remove/select any specifically. Elastic Net is the natural choice between where I want some reduction in predictors but wish to maintain more.  
+
+After running the logistic regression nested cross-validation code, the resulting plot Figure 1  showcases the predictors left after variable selection, p = 100 (a reduction of 165 predictors) when we refit set-a data onto the model, with the size and direction of the predictor's coefficients. This plot showcases the log-odds ratio of each predictor for every one unit increase (standardized from our nested cross validation process) to our outcome of death. Some estimate showcase an increase in the log-odds for every unit increase in the predictor and decrease with some variables having clearly higher log odds such as Age, GCS_last and more. Table A1 (located in the appendix) showcases the number of times each predictor shows up across our 5 folds. For the purposes of the report the full tables are in the appendix section. Across all five folds there were many predictors out of the 100 that consistently showed up such Age, max heart rate, last observed pH, last recorded WBC and more. For those with fewer consistent selection across folds those include count of cholesterol tests done, gender of patient being male, first recorded heart rate and more. In regards to consistency seeing max heart rate makes sense clinically in terms of the event death in this instance as being potentially informative to death during ICU stay indicating worsening condition of the patient while the gender in this specific data set and context may not, or the first hear rate as a more extreme value is more of concern. In our Figure 1, showcasing the strength and direction of our estimates in regards to the outcome death the largest coefficient value was the last recorded Glasgow Coma Scale which measures level of consciousness usually after head injury/traumas. In terms of stability of our selected variables with those selected only once or twice across five folds may indicate they are weak signals to the outcome death and are not held consistent across each fold of the cross validation. However variables like age or max heart rate observed these signals remained strong across each fold with each fold having a differing set of set-a patients held out, these variables are of great interest. 
+
+Table 3 showcases the AUROC of model 1 by fold with the mean and sd of the AUC also recorded. The performance for our logistic regression seems relatively good with mean AUC of 0.843 which is still close to 1 (the perfect ideal, though not as attainable in practice) indicating good performance where we are able to correctly predict the outcome for those who actually had it (the final model comparison shows further discussion on this matter). Across each fold performance was relatively consistent with a SD of 0.021, with some variation but not any great variation in AUC across our 5 nested folds. 
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: model1
+set.seed(1234) #setting seed 
+# k = 5 folds
+train_dat <- seta_wide_full1 # renaming for purposes of the cv 
+
+recipe_1 <- recipe(death ~ ., data = train_dat) |>
+  update_role(RecordID, new_role = "id") |>              
+  step_impute_median(all_numeric_predictors()) |>
+  step_unknown(all_nominal_predictors()) |> # accoutning for error I got with missing values in Gender
+  step_dummy(all_nominal_predictors()) |>                
+  step_zv(all_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+spec <- logistic_reg(penalty = tune(), mixture = tune()) |> 
+  set_engine("glmnet")
+  
+wf <- workflow() |> 
+  add_recipe(recipe_1) |> 
+  add_model(spec)
+
+enet_grid <- grid_regular(
+  penalty(range = c(-4, 0)),
+  mixture(range = c(0.05, 0.95)),
+  levels = c(penalty = 20, mixture = 5))
+
+nested <- nested_cv(train_dat, outside = vfold_cv(v = 5, strata = death),
+                         inside  = vfold_cv(v = 5, strata = death))
+outer_auc <- purrr::map(seq_len(nrow(nested)), function(k) {
+  tuned <- tune_grid(wf, resamples = nested$inner_resamples[[k]], grid = enet_grid,
+                     metrics = metric_set(mn_log_loss))
+  fit_k <- fit(finalize_workflow(wf, select_best(tuned, metric = "mn_log_loss")),
+               analysis(nested$splits[[k]]))
+  selected_k <- extract_fit_parsnip(fit_k) |>
+    tidy() |>
+    filter(term != "(Intercept)", estimate != 0) |>
+    pull(term)
+  preds <- augment(fit_k, assessment(nested$splits[[k]]))         
+  list(
+    auc = preds |> roc_auc(death, .pred_1) |> pull(.estimate),    
+    vars = selected_k,
+    preds = preds |> mutate(fold = k)                             
+  )
+})
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: fitting_m1
+tuned_all <- tune_grid(wf, resamples = vfold_cv(train_dat, v = 5, strata = death),
+                       grid = enet_grid, metrics = metric_set(mn_log_loss))
+final <- fit(finalize_workflow(wf, select_best(tuned_all, metric = "mn_log_loss")), train_dat)
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m1_selected_vars 
+# seeing which variables were selected, over half were dropped 
+vars_selected1 <- extract_fit_parsnip(final) |> tidy() |> filter(term != "(Intercept)", estimate != 0) # 100 variables selected, ~165 dropped
+vars_sel_name1 <- sort(vars_selected1$term)
+# getting vars per fold, shows number of times a vairable shows up across the 5 folds
+m1_var_list <- table(unlist(purrr::map(outer_auc, "vars")))
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m1_auroc_pred
+# auroc -> deriving from predictions
+m1_auc   <- purrr::map_dbl(outer_auc, "auc")
+preds_m1  <- purrr::map_dfr(outer_auc, "preds")
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m1_auroc
+# will put into table after running all 3 models 
+m1_auc_mean <- mean(m1_auc)
+m1_auc_sd <- sd(m1_auc)
+auroc1 <- preds_m1 |>
+  group_by(fold) |>
+  roc_auc(death, .pred_1) |> 
+  mutate(model = "LogReg")
+# flextable of AUROC for Model 1
+fold_aucs <- auroc1$.estimate   # the 5 per-fold AUCs
+
+auc_df <- data.frame(
+  Model = "LogReg",
+  t(setNames(fold_aucs, paste("Fold", 1:5))),
+  check.names = FALSE
+)
+auc_df$Mean <- mean(fold_aucs)
+auc_df$SD   <- sd(fold_aucs)
+
+auc_ft <- flextable(auc_df) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 3: Model 1 AUROC") |> 
+  autofit()
+
+auc_ft
+save_as_html(auc_ft, path = file.path(out_dir, "model1_auc_table.html"))
+```
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m1_plot
+#| fig-width: 15
+#| fig-height: 14
+
+# plot wtith predictors on a common sacle so sizes are comparable 
+# already standardized in the recipe
+model1_plot <- ggplot(vars_selected1, aes(x = estimate, y = reorder(term, estimate))) +
+  geom_col(fill = "cornflowerblue") +
+  labs(
+    title = "Figure 1: Model 1 Selected Variables"
+  )
+model1_plot
+ggsave(
+  filename = "model1_plot.png",
+  plot = model1_plot,
+  path = out_dir
+)
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m1_vars_per_fold
+# looking further into the variables per fold
+fold1 <- outer_auc[[1]]$vars # fold 1
+fold2 <-outer_auc[[2]]$vars # fold 2
+fold3 <-outer_auc[[3]]$vars # fold 3
+fold4 <- outer_auc[[4]]$vars # fold 4
+fold5 <- outer_auc[[5]]$vars # fold 5
+```
+
+
+## Model 2: non-linear effects with splines or a GAM
+
+Now we are interested in capturing potential non-linear terms in a Generalized Additive Model (GAM) that models flexible relationships with smooth functions for our continuous predictors. For this model, a select subset of predictors were chosen from Model 1 variable selection results. These variables all had strong signals and showed up in all k=5 folds of the nested model setup. These include, age, indicator of missing WBC, maximum urine output, last recorded glucose levels, number of GCS test done, last measured BUN, first recorded Albumin, HCT count, max heart rate, and lowest recorded lactate value. A end total of 10 predictors were chosen. 3 of the predictors were selected to further look into their non-linearity with partial effects plot. Across max heart rate, max urine, and last recorded glucose, all 3 continuous predictors showcase evidence against non-linearity, especially heart rate and glucose with near sloped straight lines while urine does have a curve to it indicating potential non-linearity. For urine it makes sense why it may be linear as a whole a little urine is indication of potential health issues and increased maximum amounts may also indicate concern while urine amount in between is not of concern, a quick search online pulls additional domain knowledge reference feedback loops and clinical care as potential sources. Though for heart rate and glucose it does not make as much sense as searches online regarding these measures typically follow a u-shaped trend for lower values being of concern to predict death and same for high values. In this dataset and with our GAM our effective degrees of freedom, which would be close to 1, seems to have greatly fit our penalty over these variables to make them more straight and adjust wiggliness. 
+
+Table 4 similar to Table 3 showcases AUROC for model 2 our GAM model in which compared to Model 1 has a lower mean AUC around 0.7 indicating slightly lower performance. The SD is similar to Model 1 with SD = 0.027, with each fold having relatively similar AUC with slight deviations. 
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: model2
+# seelcting 10 variables from model 1 that were in 5 folds at least: there were more thjan 20 of them so we will reduce
+set.seed(1234)
+"RecordID" %in% names(train_dat)
+recipe_2 <- recipe(death ~ Age + WBC_missing + Urine_max + Glucose_last + GCS_count + BUN_last + Albumin_first + HCT_count + HR_max + Lactate_min, data = train_dat) |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_unknown(all_nominal_predictors()) |> # accoutning for error I got with missing values in Gender
+  step_dummy(all_nominal_predictors()) |>                
+  step_zv(all_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+gam_spec <- gen_additive_mod() |> 
+  set_mode("classification") |> 
+  set_engine("mgcv")
+  
+gam_wf <- workflow() |> 
+  add_recipe(recipe_2) |> 
+  add_model(gam_spec, formula = death ~ s(Age) + WBC_missing + s(Urine_max) + s(Glucose_last) + s(GCS_count) + s(BUN_last) + s(Albumin_first) + s(HCT_count) + s(HR_max) + s(Lactate_min))
+outer_auc_gam <- purrr::map(seq_len(nrow(nested)), function(k) {
+  fit_k <- fit(gam_wf, analysis(nested$splits[[k]]))
+  preds <- augment(fit_k, assessment(nested$splits[[k]]))
+  list(auc   = preds |> roc_auc(death, .pred_1) |> pull(.estimate),
+       preds = preds |> mutate(fold = k))
+})
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m2_auc_pred
+# auroc -> deriving from predictions
+m2_auc   <- purrr::map_dbl(outer_auc_gam, "auc")
+preds_m2  <- purrr::map_dfr(outer_auc_gam, "preds")
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m2_auroc
+# AUC
+
+m2_auc_mean <- mean(m2_auc)
+m2_auc_mean
+m2_auc_sd <- sd(m2_auc) # lower auc than model 1 
+m2_auc_sd # higher than model 1
+
+auroc2 <- preds_m2 |>
+  group_by(fold) |> 
+  roc_auc(death, .pred_1) |> 
+  mutate(model = "GAM")
+# tableof model 2 auroc
+fold_aucs <- auroc2$.estimate  
+
+auc_df <- data.frame(
+  Model = "GAM",
+  t(setNames(fold_aucs, paste("Fold", 1:5))),
+  check.names = FALSE
+)
+auc_df$Mean <- mean(fold_aucs)
+auc_df$SD   <- sd(fold_aucs)
+
+auc_ft2 <- flextable(auc_df) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 4: Model 2 AUROC") |> 
+  autofit()
+
+auc_ft2
+save_as_html(auc_ft, path = file.path(out_dir, "model2_auc_table.html"))
+```
+```{r}
+#| echo: false
+#| message: false
+#| include: false
+#| warning: false
+#| label: m2_plot_prep
+seta_wide_full |> 
+  summarise(
+    hr_ref = median(HR_max, na.rm =TRUE),
+    urin_ref = median(Urine_max, na.rm = TRUE),
+    gluc_ref = median(Glucose_last, na.rm = TRUE)
+    
+  )
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m2_plot
+# partial effects plot
+train_gam <- train_dat |> mutate(death_num = as.integer(death == "1")) # making sure it follows for death not survival
+m2_fit <- mgcv::gam(death ~ s(Age) + WBC_missing + s(Urine_max) + s(Glucose_last) + s(GCS_count) + s(BUN_last) + s(Albumin_first) + s(HCT_count) + s(HR_max) + s(Lactate_min),
+                  family = binomial, data = train_gam, method = "REML")
+
+# thesse plots won't be used
+# Age
+#m2_age_plot <- plot(m2_fit, select = 1, shade = TRUE, seWithMean = TRUE, rug = TRUE) 
+# Urine_max
+#m2_urine_plot <- plot(m2_fit, select = 2, shade = TRUE,seWithMean = TRUE, rug = TRUE) 
+
+#Glucose_last 
+#m2_glucose_plot <- plot(m2_fit, select = 3, shade = TRUE, rug = TRUE, seWithMean = TRUE) 
+
+# using odds ratio against a reference -> similar to first plot, will use this set up from lecture notes
+# looks better than the plot()
+
+ref_hr <- 110
+ref_ur <- 450
+ref_gluc <- 121
+
+# HR_max -> chsoe this over Age
+g <- m2_fit$model[rep(1, 201), ]    # one complete row, repeated 201 times
+g$HR_max <- c(seq(min(train_gam$HR_max, na.rm = TRUE), max(train_gam$HR_max,na.rm = TRUE), length.out = 200), ref_hr)
+Xp <- predict(m2_fit, newdata = g, type = "lpmatrix")
+Xd <- sweep(Xp, 2, Xp[201, ])                   # each row minus the reference row (reference row kept)
+est <- as.vector(Xd %*% coef(m2_fit))           # log odds ratio vs age 67
+se  <- sqrt(rowSums((Xd %*% vcov(m2_fit)) * Xd))
+hr_or <- tibble(HR_max = g$HR_max,
+                 OR = exp(est), lo = exp(est - 1.96 * se), hi = exp(est + 1.96 * se)) |>
+  arrange(HR_max)
+m2_hr_plot <- ggplot(age_or, aes(Age, OR)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
+  geom_line() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_vline(xintercept = ref_age, linetype = "dotted") +
+  geom_rug(data = m2_fit$model, aes(x = Age), inherit.aes = FALSE, alpha = 0.12, sides = "b") +
+  scale_y_log10() +
+  labs(
+    x = "Heart Rate (bpm)", 
+    y = "Odds ratio vs HR = 67",
+    title = "Figure 2: Max HR Partial Effects")
+ggsave(
+  filename = "model2_hr_plot.png",
+  plot = m2_hr_plot,
+  path = out_dir
+)
+# URINE_MAX
+g <- m2_fit$model[rep(1, 201), ]    # one complete row, repeated 201 times
+g$Urine_max <- c(seq(min(train_gam$Urine_max, na.rm = TRUE),
+                     max(train_gam$Urine_max, na.rm = TRUE), length.out = 200), ref_ur)
+Xp <- predict(m2_fit, newdata = g, type = "lpmatrix")
+Xd <- sweep(Xp, 2, Xp[201, ])                   # each row minus the reference row (reference row kept)
+est <- as.vector(Xd %*% coef(m2_fit))           # log odds ratio vs age 67
+se  <- sqrt(rowSums((Xd %*% vcov(m2_fit)) * Xd))
+urine_or <- tibble(Urine_max = g$Urine_max,
+                 OR = exp(est), lo = exp(est - 1.96 * se), hi = exp(est + 1.96 * se)) |>
+  arrange(Urine_max)
+m2_urine_plot <- ggplot(urine_or, aes(Urine_max, OR)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
+  geom_line() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_vline(xintercept = ref_ur, linetype = "dotted") +
+  geom_rug(data = m2_fit$model, aes(x = Urine_max), inherit.aes = FALSE, alpha = 0.12, sides = "b") +
+  scale_y_log10() +
+  labs(
+    x = "Urine (mL)", 
+    y = "Odds ratio vs urine_max = 450",
+    title = "Figure 3: Max Urine Partial Effects")
+ggsave(
+  filename = "model2_urine_plot.png",
+  plot = m2_urine_plot,
+  path = out_dir
+)
+# GLUCOSE_LAST
+g <- m2_fit$model[rep(1, 201), ]    # one complete row, repeated 201 times
+g$Glucose_last <- c(seq(min(train_gam$Glucose_last, na.rm = TRUE),
+                     max(train_gam$Glucose_last, na.rm = TRUE), length.out = 200), ref_gluc)
+Xp <- predict(m2_fit, newdata = g, type = "lpmatrix")
+Xd <- sweep(Xp, 2, Xp[201, ])                   # each row minus the reference row (reference row kept)
+est <- as.vector(Xd %*% coef(m2_fit))           # log odds ratio vs age 67
+se  <- sqrt(rowSums((Xd %*% vcov(m2_fit)) * Xd))
+glucose_or <- tibble(Glucose_last = g$Glucose_last,
+                 OR = exp(est), lo = exp(est - 1.96 * se), hi = exp(est + 1.96 * se)) |>
+  arrange(Glucose_last)
+m2_glucose_plot <- ggplot(glucose_or, aes(Glucose_last, OR)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
+  geom_line() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_vline(xintercept = ref_gluc, linetype = "dotted") +
+  geom_rug(data = m2_fit$model, aes(x = Glucose_last), inherit.aes = FALSE, alpha = 0.12, sides = "b") +
+  scale_y_log10() +
+  labs(
+    x = "Glucose (mg/dL)", 
+    y = "Odds ratio vs Glucose_Last = 121",
+    title = "Figure 4: Last Measured Glucose Partial Effects")
+ggsave(
+  filename = "model2_glucose_plot.png",
+  plot = m2_glucose_plot,
+  path = out_dir
+)
+```
+
+
+## Model 3: tree ensemble
+
+The final model we are interested in testing a random forest model which will utilize the same nested cross-validation setup like model 1 and 2. For this model a tuning grid was set for mtry. This model does not utilize early stopping and missingness has been imputed within the tinymodels recipe setup utilizing the median for numeric predictors. The tuning grid for mtry was determined with the help of AI in utilizing close up to all the available predictors ranging from 5 to 130. Additionally the number of trees was set at 500 and minimum node size 10 to reduce run time of the code, setting minimum node size was the initial approach but later switched due to run time issues. 
+Table 5 showcases the AUROC of model 3 where the performance of the random forest parallels the performance of model 1 with a mean AUC of 0.841 close to model 1 but just slightly underb ut with a better SD of 0.006 indicating very little variation across the folds indicating consistency in the models prediction ability for our outcome of hospital death. 
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: model3
+set.seed(1234)
+recipe_3 <- recipe(death ~ ., data = train_dat) |>
+  update_role(RecordID, new_role = "id") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_unknown(all_nominal_predictors()) |> # accoutning for error I got with missing values in Gender
+  step_dummy(all_nominal_predictors()) |>                
+  step_zv(all_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+rf_spec <- rand_forest(mtry = tune(), min_n = 10, trees = 500) |> # setting min_n to 10 for classification and tune for mtry
+  set_mode("classification") |> 
+  set_engine("ranger")
+rf_grid <- tibble(mtry = c(5, 16, 40, 90, 130)) # had help with AI here
+rf_wf <- workflow() |> 
+  add_recipe(recipe_3) |> 
+  add_model(rf_spec)
+
+outer_auc_rf <- purrr::map(seq_len(nrow(nested)), function(k) {
+  tuned <- tune_grid(rf_wf, resamples = nested$inner_resamples[[k]], grid = rf_grid,
+                     metrics = metric_set(mn_log_loss))
+  fit_k <- fit(finalize_workflow(rf_wf, select_best(tuned, metric = "mn_log_loss")), analysis(nested$splits[[k]]))
+  preds <- augment(fit_k, assessment(nested$splits[[k]])) 
+  list(auc   = preds |> 
+         roc_auc(death, .pred_1) |> 
+         pull(.estimate), preds = preds |> 
+         mutate(fold = k))
+})
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: m3_auroc
+ # auroc
+# auroc -> deriving from predictions
+m3_auc   <- purrr::map_dbl(outer_auc_rf, "auc")
+preds_m3  <- purrr::map_dfr(outer_auc_rf, "preds")
+
+m3_auc_mean <- mean(m3_auc)
+m3_auc_mean
+m3_auc_sd <- sd(m3_auc) # lower auc than model 1 
+m3_auc_sd
+auroc3 <- preds_m3 |>
+  group_by(fold) |>
+  roc_auc(death, .pred_1) |> 
+  mutate(model = "RandomForest")
+# table of model 3 auroc output
+fold_aucs <- auroc3$.estimate  
+
+auc_df <- data.frame(
+  Model = "RandomForest",
+  t(setNames(fold_aucs, paste("Fold", 1:5))),
+  check.names = FALSE
+)
+auc_df$Mean <- mean(fold_aucs)
+auc_df$SD   <- sd(fold_aucs)
+
+auc_ft3 <- flextable(auc_df) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 5: Model 3 AUROC") |> 
+  autofit()
+
+auc_ft3
+save_as_html(auc_ft, path = file.path(out_dir, "model3_auc_table.html"))
+```
+
+## Comparison and Final Model
+
+Across all three models, we ran the final model for selection after comparing AUROC, mean, SD, and the ROC curve. Model 1 is logistic regression with elastic net. In this model, it has the highest mean AUROC, but the random forest model does come close behind. However, when looking across each fold, Model 1 outperformed the RF model in 3 folds, while the RF only beat the logistic model in 2 folds. The SD is still relatively low, but not as low for RF. In the ROC plot, the logistic regression stands out as slightly improved from random forest, with GAM and the benchmarks clearly separated with much smaller areas under the curves. When comparing Model 1 to our benchmarks, SAPS-I and SOFA, Model 1 clearly outperforms with a mean AUC of 0.843 versus 0.649/0.622. When looking across fold-to-fold variation, across the five folds, nowhere do the benchmarks beat Model 1, or any of the given models. The consistency of the results for benchmarks is quite close to the models, with SD at 0.30 or 0.027 (Model 1 SD = 0.021); it has greater inconsistency from the other models in the table. Having already examined the performance of Model 1, we can also refer to the simplicity of the model, reporting the log odds of our outcome, death, much more simply and better understanding what occurs in the model utilizing elastic net penalty, and easier to explain with other collaborators. This is what gives Model 1 the better look even with random forest close by in performance. Since in terms of interpretation and simplicity in setup (or more-so intuitive), with a greater mean AUC, Model 1 is the final model of choice, which we will refit set-a to.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: final_table_prep
+# table prep -> getting benchamark per fold auroc, mean and sd
+
+bench <- seta_wide_full |>
+  select(RecordID, death, `SAPS-I`, SOFA) |>
+  left_join(preds_m1 |> select(RecordID, fold), by = "RecordID")
+
+auroc_saps <- bench |>
+  group_by(fold) |>
+  roc_auc(death, `SAPS-I`)
+
+auroc_sofa <- bench |>
+  group_by(fold) |>
+  roc_auc(death, SOFA)
+
+saps_auc_mean <- mean(auroc_saps$.estimate)
+saps_auc_sd   <- sd(auroc_saps$.estimate)
+sofa_auc_mean <- mean(auroc_sofa$.estimate)
+sofa_auc_sd   <- sd(auroc_sofa$.estimate)
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: final_table
+#Table: AUROC, Mean, & SD -> using flextable 
+auroc_tbl <- tibble(
+  Model    = c("LogReg", "GAM", "RandomForest", "SAPS-I", "SOFA"),
+  `Fold 1` = c(auroc1$.estimate[1], auroc2$.estimate[1], auroc3$.estimate[1], auroc_saps$.estimate[1], auroc_sofa$.estimate[1]),
+  `Fold 2` = c(auroc1$.estimate[2], auroc2$.estimate[2], auroc3$.estimate[2], auroc_saps$.estimate[2], auroc_sofa$.estimate[2]),
+  `Fold 3` = c(auroc1$.estimate[3], auroc2$.estimate[3], auroc3$.estimate[3], auroc_saps$.estimate[3], auroc_sofa$.estimate[3]),
+  `Fold 4` = c(auroc1$.estimate[4], auroc2$.estimate[4], auroc3$.estimate[4], auroc_saps$.estimate[4], auroc_sofa$.estimate[4]),
+  `Fold 5` = c(auroc1$.estimate[5], auroc2$.estimate[5], auroc3$.estimate[5], auroc_saps$.estimate[5], auroc_sofa$.estimate[5]),
+  Mean     = c(m1_auc_mean, m2_auc_mean, m3_auc_mean, saps_auc_mean, sofa_auc_mean),
+  SD       = c(m1_auc_sd, m2_auc_sd, m3_auc_sd, saps_auc_sd, sofa_auc_sd)
+)
+
+auroc_ft <- flextable(auroc_tbl) |>
+  colformat_double(digits = 3) |> 
+  set_caption("Table 6: Model and Benchmark Comparisons")
+auroc_ft
+# saving the table 
+save_as_html(auroc_ft, path = file.path(out_dir, "auroc_comparison.html"))
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: roc_curves
+# ROC models, 5 lines for 3 models + 2 benchmarks
+
+roc1 <- preds_m1 |> 
+  roc_curve(death, .pred_1) |> 
+  mutate(model = "LogReg")
+
+roc2 <- preds_m2 |> 
+  roc_curve(death, .pred_1) |> 
+  mutate(model = "GAM")
+
+roc3 <- preds_m3 |> 
+  roc_curve(death, .pred_1) |> 
+  mutate(model = "RandomForest")
+
+roc_saps <- seta_wide_full |>
+  roc_curve(death, `SAPS-I`) |> 
+  mutate(model = "SAPS-I")
+
+roc_sofa <- seta_wide_full |>
+  roc_curve(death, SOFA) |> 
+  mutate(model = "SOFA")
+
+roc_plot <- rbind(roc1,roc2,roc3, roc_saps, roc_sofa) 
+
+# plot
+roc_plot_all <- ggplot(data = roc_plot, aes(x = 1 - specificity, y = sensitivity, color = model)) +
+  geom_path() +
+  geom_abline(linetype = "dashed") +
+  coord_equal() +
+  labs(
+    x = "1 - Specificity",
+    y = "Sensitivity",
+    title = "Figure 5: ROC Curves Model 1-3 + Benchmarks",
+    color = "Model"
+  ) +
+  theme_bw()
+roc_plot_all
+ggsave(
+  filename = "roc_curve_plot.png",
+  plot = roc_plot_all,
+  path = out_dir,
+  width = 8, height = 10, dpi = 300
+)
+```
+### Model Re-Fit
+Based upon AUROC assessment alongside the ROC curve plot, the final model of choice is the logistic regression model with elastic net, as explained above. By performance it had the highest mean AUC and on top of this high value it separated out from random forest due to time simplicity of a logistic regression model in interpreting log odds compared to the random forest model. For this reason, this makes the logistic regression model more appealing and will be selected for further investigation in checkpoint 3. 
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: final_model_refit
+# refitting on all of set-a
+
+# save final fitted model as: output/cp2_final_model.rds
+# did this already for the coefficient plot for model 1 
+tuned_all <- tune_grid(wf, resamples = vfold_cv(train_dat, v = 5, strata = death),
+                       grid = enet_grid, metrics = metric_set(mn_log_loss))
+final_seta <- fit(finalize_workflow(wf, select_best(tuned_all, metric = "mn_log_loss")), train_dat)
+
+saveRDS(final_seta, file.path(out_dir, "cp2_final_model.rds"))
+
+
+# out of fold predictions for all models: output/cp2_oof_predictions.csv
+# basically the table comparisoin variables but expanding to show data udnerneath those summaries
+oof1 <- preds_m1 |> select(RecordID, fold, death, .pred_1) |> mutate(model = "LogReg")
+oof2 <- preds_m2 |> select(RecordID, fold, death, .pred_1) |> mutate(model = "GAM")
+oof3 <- preds_m3 |> select(RecordID, fold, death, .pred_1) |> mutate(model = "RandomForest")
+
+oof_saps <- bench |> select(RecordID, fold, death, .pred_1 = `SAPS-I`) |> mutate(model = "SAPS-I")
+oof_sofa <- bench |> select(RecordID, fold, death, .pred_1 = SOFA)     |> mutate(model = "SOFA")
+
+oof_all <- bind_rows(oof1, oof2, oof3, oof_saps, oof_sofa)
+
+
+fwrite(oof_all, file.path(out_dir, "cp2_oof_predictions.csv"))
+```
+
+## AI Disclosure 
+
+AI was utilized in this study to support the code structure. I utilized Claude to help outline some code mainly to get code to turn my dataframes for tables into nice looking tables using the flextable package. I mainly used Claude to debug my code as I switched between model 1, model 2 and model 3 using the provided code from week lecture notes as a base and finding ways from Claude to to add onto such as when I wanted the output_auc objects to produce the list of variables from model 1. For the tidymodels code I checked my code alongside examples online to ensure what each part in the recipe chunk, and workflow meant. No AI was used for the text in this checkpoint, all written responses are by me. AI was utilized in the generating of table code to quicken the process, debug and enhance code given to us and structure code for parts we did not have a code outline for such as using roc_curve which I was able to check quickly with online with the function documentation. Some tuning grids I have let AI select as I was unfamiliar on how to setup a tuning grid for Model 3 and Model 1. For Model 1 I was able to compare my tuning grid to the example in lecture and online examples for model 3 I was unsure and let the AI run. I was not able to compare this to any lecture notes. 
+
+## Appendix 
+
+Necessary tables that were too long to include in the main text of the report are kept here, mainly for Model 1 only to reduce scrolling in the middle of the report. 
+
+### 2.4 Model 1: Selected Variables Full Table
+
+#### Table A1
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: appendix
+m1_var_df <- as.data.frame(m1_var_list, stringsAsFactors = FALSE) |>
+  rename(Predictor = Var1, Folds_selected = Freq) |>
+  arrange(desc(Folds_selected), Predictor)
+
+m1_var_ft <- flextable(m1_var_df) |>
+  set_header_labels(Folds_selected = "Folds selected (of 5)") |>
+  set_caption("Table A1: Number of folds each predictor was selected") |>
+  autofit()
+
+m1_var_ft
+save_as_html(m1_var_ft, path = file.path(out_dir, "m1_var_folds.html"))
+```
+
+
+
+
