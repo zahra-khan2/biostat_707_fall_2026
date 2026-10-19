@@ -630,7 +630,7 @@ se  <- sqrt(rowSums((Xd %*% vcov(m2_fit)) * Xd))
 hr_or <- tibble(HR_max = g$HR_max,
                  OR = exp(est), lo = exp(est - 1.96 * se), hi = exp(est + 1.96 * se)) |>
   arrange(HR_max)
-m2_hr_plot <- ggplot(age_or, aes(Age, OR)) +
+m2_hr_plot <- ggplot(hr_or, aes(HR_max, OR)) +
   geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
   geom_line() +
   geom_hline(yintercept = 1, linetype = "dashed") +
