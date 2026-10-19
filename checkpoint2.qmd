@@ -510,7 +510,7 @@ Table 4 similar to Table 3 showcases AUROC for model 2 our GAM model in which co
 #| label: model2
 # seelcting 10 variables from model 1 that were in 5 folds at least: there were more thjan 20 of them so we will reduce
 set.seed(1234)
-"RecordID" %in% names(train_dat)
+
 recipe_2 <- recipe(death ~ Age + WBC_missing + Urine_max + Glucose_last + GCS_count + BUN_last + Albumin_first + HCT_count + HR_max + Lactate_min, data = train_dat) |>
   step_impute_median(all_numeric_predictors()) |>
   step_unknown(all_nominal_predictors()) |> # accoutning for error I got with missing values in Gender
@@ -552,9 +552,7 @@ preds_m2  <- purrr::map_dfr(outer_auc_gam, "preds")
 # AUC
 
 m2_auc_mean <- mean(m2_auc)
-m2_auc_mean
-m2_auc_sd <- sd(m2_auc) # lower auc than model 1 
-m2_auc_sd # higher than model 1
+m2_auc_sd <- sd(m2_auc) 
 
 auroc2 <- preds_m2 |>
   group_by(fold) |> 
@@ -750,11 +748,9 @@ outer_auc_rf <- purrr::map(seq_len(nrow(nested)), function(k) {
 # auroc -> deriving from predictions
 m3_auc   <- purrr::map_dbl(outer_auc_rf, "auc")
 preds_m3  <- purrr::map_dfr(outer_auc_rf, "preds")
-
 m3_auc_mean <- mean(m3_auc)
-m3_auc_mean
 m3_auc_sd <- sd(m3_auc) # lower auc than model 1 
-m3_auc_sd
+
 auroc3 <- preds_m3 |>
   group_by(fold) |>
   roc_auc(death, .pred_1) |> 
