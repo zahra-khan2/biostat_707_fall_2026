@@ -634,8 +634,8 @@ m2_hr_plot <- ggplot(hr_or, aes(HR_max, OR)) +
   geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
   geom_line() +
   geom_hline(yintercept = 1, linetype = "dashed") +
-  geom_vline(xintercept = ref_age, linetype = "dotted") +
-  geom_rug(data = m2_fit$model, aes(x = Age), inherit.aes = FALSE, alpha = 0.12, sides = "b") +
+  geom_vline(xintercept = ref_hr, linetype = "dotted") +
+  geom_rug(data = m2_fit$model, aes(x = HR_max), inherit.aes = FALSE, alpha = 0.12, sides = "b") +
   scale_y_log10() +
   labs(
     x = "Heart Rate (bpm)", 
