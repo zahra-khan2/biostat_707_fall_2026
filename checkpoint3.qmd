@@ -1,0 +1,1149 @@
+---
+title: "checkpoint3"
+author: "Zahra Khan (zk57)"
+date: now
+format:
+  html:
+    embed-resources: true
+    toc: true
+engine: knitr
+execute:
+  echo: true
+  warning: false
+  error: false
+---
+# Checkpoint 3 
+
+In this checkpoint we will be assessing my final logistic regression model found from nested cross validation with penalization using elastic net. In this stage we will be assessing discrimination, calibration and clinical usefulness of my final model utilzing data the nested cv process did not see using set-b and set-cto see how well my final model performs.
+
+To begin we will start by applying our model from checkpoint 2 to set-b and set-c. Data cleaning and similar procedures used on set-a as well as preprocessing steps will be put on set-b and set-c to maintain consistency. 
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: Setup 
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(ggplot2); library(data.table) ; library(gtsummary); library(visdat); library(tidyverse); library(flextable); library(gt); library(tidymodels); library(skimr); library(yardstick); library(pROC)
+})
+here::i_am("checkpoint3.qmd")
+data_dir <- here::here("data")
+out_dir  <- here::here("output")
+dir.create(out_dir, showWarnings = FALSE)
+expected_n <- 4000
+# code loading
+check_set_a <- function() {
+  # data/set-a/ and data/Outcomes-a.txt must already be in place
+  stopifnot("data/Outcomes-a.txt is missing" =
+              file.exists(file.path(data_dir, "Outcomes-a.txt")))
+  n <- length(list.files(file.path(data_dir, "set-a"), pattern = "\\.txt$"))
+  stopifnot("data/set-a does not have 4000 records" = n == expected_n)
+}
+
+outcomes <- fread(file.path(data_dir, "Outcomes-a.txt"))
+stopifnot(nrow(outcomes) == expected_n)
+
+# outcome b 
+outcomes_b <- fread(file.path(data_dir, "Outcomes-b.txt"))
+stopifnot(nrow(outcomes_b) == expected_n)
+
+# NEW: load the saved model from CP2 (do not refit)
+final_seta <- readRDS(file.path(out_dir, "cp2_final_model.rds"))
+
+files <- list.files(file.path(data_dir, "set-b"), full.names = TRUE)
+stopifnot(length(files) == expected_n)       # NEW: same check you did for set-a
+
+setb_list <- list()
+for(i in seq_along(files)) {
+  setb_list[[i]] <- fread(files[i])
+}
+
+setb_long <- rbindlist(setb_list, use.names = TRUE, fill = FALSE, idcol = NULL, ignore.attr = FALSE)
+
+# outcomes for set-c (same as set-b, file name changed)
+outcomes_c <- fread(file.path(data_dir, "Outcomes-c.txt"))
+stopifnot(nrow(outcomes_c) == expected_n)
+
+# load the 4000 set-c files
+files <- list.files(file.path(data_dir, "set-c"), full.names = TRUE, pattern = "\\.txt$")
+stopifnot(length(files) == expected_n)
+
+setc_list <- list()
+for(i in seq_along(files)) {
+  setc_list[[i]] <- fread(files[i])
+}
+
+setc_long <- rbindlist(setc_list, use.names = TRUE, fill = FALSE, idcol = NULL, ignore.attr = FALSE)
+
+
+```
+
+## 3.1 Applying Model to Set-b & Set-c
+
+### 3.1.1 Data Cleaning 
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: cleanup_setb
+# set-b clean -> reapplying cleaning from set-a to set-b and set-c the same way
+setb_long_adj <- setb_long |>
+  mutate(record = cumsum(Parameter == "RecordID")) |>
+  group_by(record) |>
+  mutate(RecordID = Value[Parameter == "RecordID"][1]) |>
+  ungroup()
+
+#### gender, height, weight -> hold all missingness in seta_long
+setb_long_na <- setb_long_adj |>
+  mutate(
+    Value = if_else(
+      Parameter %in% c("Gender", "Weight", "Height") & Value == -1,
+      NA_real_, Value))
+
+# implausible values -> NA, the exact same ranges as set-a 
+setb_long_full <- setb_long_na |>
+  mutate(Value = case_when(
+    Parameter == "pH"    & (Value < 6.5 | Value > 8) ~ NA_real_,
+    Parameter == "Temp"  & (Value < 25  | Value > 44) ~ NA_real_,
+    Parameter == "DiasABP"    & Value == 0 ~ NA_real_,
+    Parameter == "SysABP"     & Value == 0 ~ NA_real_,
+    Parameter == "MAP"        & Value == 0 ~ NA_real_,
+    Parameter == "NIDiasABP"  & Value == 0 ~ NA_real_,
+    Parameter == "NISysABP"   & Value == 0 ~ NA_real_,
+    Parameter == "NIMAP"      & Value == 0 ~ NA_real_,
+    Parameter == "HR"    & (Value == 0  | Value > 250) ~ NA_real_,
+    Parameter == "K"     & Value > 12 ~ NA_real_,
+    Parameter == "PaCO2" & Value < 10 ~ NA_real_,
+    Parameter == "PaO2"  & Value == 0 ~ NA_real_,
+    Parameter == "Weight" & Value <= 30 ~ NA_real_,
+    Parameter == "Height" & (Value < 100 | Value > 250) ~ NA_real_,
+    TRUE ~ Value
+  ))
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| include: false
+#| warning: false
+#| label: setb_wide
+
+setb_wide <- setb_long_full |>
+  filter(Parameter != "RecordID") |>
+  mutate(Time = as.numeric(substr(Time, 1, 2)) +
+                as.numeric(substr(Time, 4, 5)) / 60) |>
+  summarise(
+    mean  = mean(Value, na.rm = TRUE),
+    min   = suppressWarnings(min(Value, na.rm = TRUE)),
+    max   = suppressWarnings(max(Value, na.rm = TRUE)),
+    count = sum(!is.na(Value)),
+    first = dplyr::first(Value, na_rm = TRUE),
+    last  = dplyr::last(Value, na_rm = TRUE),
+    .by = c(RecordID, Parameter)
+  ) |>
+  pivot_wider(
+    names_from = Parameter,
+    values_from = c(mean, min, max, count, first, last),
+    names_glue = "{Parameter}_{.value}",
+    values_fill = list(count = 0)
+  )
+
+# fix Inf / NaN
+setb_wide <- setb_wide |>
+  mutate(across(where(is.numeric),
+                ~ if_else(is.infinite(.) | is.nan(.), NA_real_, .)))
+setb_wide_full <- setb_wide |>
+  left_join(outcomes_b, by = "RecordID")
+setb_wide_full <- setb_wide_full |>
+  mutate(across(c(`SAPS-I`, SOFA), ~ if_else(.x == -1, NA_real_, .x)))
+
+# checking I did clean up rightL:
+nrow(setb_wide_full) # 4,000 txt files, all good!
+```
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: setc_clean
+
+setc_long_adj <- setc_long |>
+  mutate(record = cumsum(Parameter == "RecordID")) |>
+  group_by(record) |>
+  mutate(RecordID = Value[Parameter == "RecordID"][1]) |>
+  ungroup()
+setc_long_na <- setc_long_adj |>
+  mutate(
+    Value = if_else(
+      Parameter %in% c("Gender", "Weight", "Height") & Value == -1,
+      NA_real_, Value))
+setc_long_full <- setc_long_na |>
+  mutate(Value = case_when(
+    Parameter == "pH"    & (Value < 6.5 | Value > 8) ~ NA_real_,
+    Parameter == "Temp"  & (Value < 25  | Value > 44) ~ NA_real_,
+    Parameter == "DiasABP"    & Value == 0 ~ NA_real_,
+    Parameter == "SysABP"     & Value == 0 ~ NA_real_,
+    Parameter == "MAP"        & Value == 0 ~ NA_real_,
+    Parameter == "NIDiasABP"  & Value == 0 ~ NA_real_,
+    Parameter == "NISysABP"   & Value == 0 ~ NA_real_,
+    Parameter == "NIMAP"      & Value == 0 ~ NA_real_,
+    Parameter == "HR"    & (Value == 0  | Value > 250) ~ NA_real_,
+    Parameter == "K"     & Value > 12 ~ NA_real_,
+    Parameter == "PaCO2" & Value < 10 ~ NA_real_,
+    Parameter == "PaO2"  & Value == 0 ~ NA_real_,
+    Parameter == "Weight" & Value <= 30 ~ NA_real_,
+    Parameter == "Height" & (Value < 100 | Value > 250) ~ NA_real_,
+    TRUE ~ Value
+  ))
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: setc_wide
+setc_wide <- setc_long_full |>
+  filter(Parameter != "RecordID") |>
+  mutate(Time = as.numeric(substr(Time, 1, 2)) +
+                as.numeric(substr(Time, 4, 5)) / 60) |>
+  summarise(
+    mean  = mean(Value, na.rm = TRUE),
+    min   = suppressWarnings(min(Value, na.rm = TRUE)),
+    max   = suppressWarnings(max(Value, na.rm = TRUE)),
+    count = sum(!is.na(Value)),
+    first = dplyr::first(Value, na_rm = TRUE),
+    last  = dplyr::last(Value, na_rm = TRUE),
+    .by = c(RecordID, Parameter)
+  ) |>
+  pivot_wider(
+    names_from = Parameter,
+    values_from = c(mean, min, max, count, first, last),
+    names_glue = "{Parameter}_{.value}",
+    values_fill = list(count = 0)
+  )
+setc_wide <- setc_wide |>
+  mutate(across(where(is.numeric),
+                ~ if_else(is.infinite(.) | is.nan(.), NA_real_, .)))
+setc_wide_full <- setc_wide |>
+  left_join(outcomes_c, by = "RecordID")
+setc_wide_full <- setc_wide_full |>
+  mutate(across(c(`SAPS-I`, SOFA), ~ if_else(.x == -1, NA_real_, .x)))
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: adjsuting_bc
+# keeping only one column for our demographics, not the first/last/etc. 
+setb_wide_full <- setb_wide_full |>
+  select(-matches("^(Age|Gender|Height|Weight|ICUType)_(mean|min|max|last)$"),
+         -matches("^(Age|ICUType)_count$")) |>
+  rename(Age = Age_first, Gender = Gender_first, Height = Height_first,
+         Weight = Weight_first, ICUType = ICUType_first) |>
+  mutate(
+    Gender  = factor(Gender, levels = c(0, 1), labels = c("Female", "Male")),
+    ICUType = factor(ICUType, levels = 1:4,
+                     labels = c("Coronary Care Unit", "Cardiac Surgery Recovery Unit",
+                                "Medical ICU", "Surgical ICU")),
+    death = factor(`In-hospital_death`, levels = c(1, 0)) # ensuring death is binary
+  )
+# applying same thing here
+setc_wide_full <- setc_wide_full |>
+  select(-matches("^(Age|Gender|Height|Weight|ICUType)_(mean|min|max|last)$"),
+         -matches("^(Age|ICUType)_count$")) |>
+  rename(Age = Age_first, Gender = Gender_first, Height = Height_first,
+         Weight = Weight_first, ICUType = ICUType_first) |>
+  mutate(
+    Gender  = factor(Gender, levels = c(0, 1), labels = c("Female", "Male")),
+    ICUType = factor(ICUType, levels = 1:4,
+                     labels = c("Coronary Care Unit", "Cardiac Surgery Recovery Unit",
+                                "Medical ICU", "Surgical ICU")),
+    death = factor(`In-hospital_death`, levels = c(1, 0))
+  )
+#benchmark variabels for later parts of checkpoint 3 
+setb_bench <- setb_wide_full |> select(RecordID, death, `SAPS-I`, SOFA)
+setc_bench <- setc_wide_full |> select(RecordID, death, `SAPS-I`, SOFA)
+# update set-a and set-c wide dataframes 
+setb_wide_full1 <- setb_wide_full |>
+  select(-`In-hospital_death`, -Survival, -Length_of_stay, -`SAPS-I`, -SOFA) |>
+  relocate(RecordID, Age, Gender, Height, Weight, ICUType, death,
+           Height_count, Weight_count, Gender_count)
+setc_wide_full1 <- setc_wide_full |>
+  select(-`In-hospital_death`, -Survival, -Length_of_stay, -`SAPS-I`, -SOFA) |>
+  relocate(RecordID, Age, Gender, Height, Weight, ICUType, death,
+           Height_count, Weight_count, Gender_count)
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: misingness_ind
+# missingness indicators based on count columns similar to set-a in checkpoint 2 
+count_cols_b <- grep("_count$", names(setb_wide_full1), value = TRUE)
+flags_b <- setb_wide_full1 |>
+  select(all_of(count_cols_b)) |>
+  mutate(across(everything(), ~ as.integer(.x == 0))) |>
+  rename_with(~ sub("_count$", "_missing", .x))
+setb_wide_full1 <- bind_cols(setb_wide_full1, flags_b)
+
+count_cols_c <- grep("_count$", names(setc_wide_full1), value = TRUE)
+flags_c <- setc_wide_full1 |>
+  select(all_of(count_cols_c)) |>
+  mutate(across(everything(), ~ as.integer(.x == 0))) |>
+  rename_with(~ sub("_count$", "_missing", .x))
+setc_wide_full1 <- bind_cols(setc_wide_full1, flags_c)
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: var_check
+# used AI to create a check to ensure that set-b and set-c have the same columns for prediction
+needed <- extract_recipe(final_seta, estimated = TRUE)$var_info |>
+  filter(role == "predictor") |> pull(variable)
+
+# check these four. Ideally all print character(0)
+setdiff(needed, names(setb_wide_full1))
+setdiff(names(setb_wide_full1), c(needed, "RecordID", "death"))
+setdiff(needed, names(setc_wide_full1))
+setdiff(names(setc_wide_full1), c(needed, "RecordID", "death"))
+
+# keeping only set-a's predictors, in set-a's order
+setb_model <- setb_wide_full1 |> select(RecordID, death, all_of(needed))
+setc_model <- setc_wide_full1 |> select(RecordID, death, all_of(needed))
+```
+
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: model_app
+# applying imputation values, scaling and preprociessing from checkpoint 2 here
+# Had to use to figure how to do this
+# set b 
+setb_preds <- augment(final_seta, setb_model)
+# set-c
+setc_preds <- augment(final_seta, setc_model)
+```
+
+### 3.1.2 Summary of Stays & Deaths (Set b & c)
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 1: Stays and deaths in set-b and set-c"
+#| label: table1
+# table of stays and deaths in both set-b and set-c
+# also added in death rate
+counts_tbl <- bind_rows(
+  setb_model |> summarise(Set = "set-b", Stays = n(),
+                          Deaths = sum(death == "1"),
+                          `Death rate (%)` = round(100 * mean(death == "1"), 1)),
+  setc_model |> summarise(Set = "set-c", Stays = n(),
+                          Deaths = sum(death == "1"),
+                          `Death rate (%)` = round(100 * mean(death == "1"), 1))
+)
+
+counts_ft <- flextable(counts_tbl) |>
+  set_caption("Table 1: Stays and deaths in set-b and set-c") |>
+  autofit()
+counts_ft
+```
+
+## 3.2 Discrimination
+
+
+### 3.2.1 Bootstrap
+
+In this chunk we find AUROC on set-b then set-c with bootstrap 95% CI. Then we find the AUROC for SAPS-1 and SOFA from each set (these are our benchmark variables) to compare with. 
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: bootstrap_ci
+# utilizing code from lecture slides
+set.seed(1234)
+
+roc_b <- roc(setb_preds$death, setb_preds$.pred_1, levels = c("0", "1"), direction = "<", quiet = TRUE)
+roc_c <- roc(setc_preds$death, setc_preds$.pred_1, levels = c("0", "1"), direction = "<", quiet = TRUE)
+roc_b
+roc_c
+# slide 63: stratified bootstrap 95% CI 
+ci_b <- ci.auc(roc_b, method = "bootstrap", boot.n = 2000)
+ci_c <- ci.auc(roc_c, method = "bootstrap", boot.n = 2000)
+
+# AUROC taken from the ROC object itself, CI ends from the bootstrap
+auc_b <- as.numeric(auc(roc_b))
+auc_c <- as.numeric(auc(roc_c))
+
+auc_model_tbl <- tibble(
+  Set   = c("set-b", "set-c"),
+  AUROC = c(auc_b, auc_c),
+  Lower = c(ci_b[1], ci_c[1]),
+  Upper = c(ci_b[3], ci_c[3])
+)
+auc_model_tbl
+
+
+```
+
+```{r}
+#| echo: false
+#| include: false
+#| message: false
+#| warning: false
+#| label: aucroc_benchmarks
+
+set.seed(1234)
+
+# drop patients with a missing score (the -1 values you set to NA)
+saps_b <- setb_bench |> filter(!is.na(`SAPS-I`))
+saps_c <- setc_bench |> filter(!is.na(`SAPS-I`))
+sofa_b <- setb_bench |> filter(!is.na(SOFA))
+sofa_c <- setc_bench |> filter(!is.na(SOFA))
+
+# how many were dropped (report this)
+nrow(setb_bench) - nrow(saps_b)
+nrow(setc_bench) - nrow(saps_c)
+nrow(setb_bench) - nrow(sofa_b)
+nrow(setc_bench) - nrow(sofa_c)
+
+# same roc() setup as the model: controls = survived (0), cases = died (1)
+# higher SAPS-I / SOFA = higher risk, so direction "<"
+roc_saps_b <- roc(saps_b$death, saps_b$`SAPS-I`, levels = c("0", "1"), direction = "<", quiet = TRUE)
+roc_saps_c <- roc(saps_c$death, saps_c$`SAPS-I`, levels = c("0", "1"), direction = "<", quiet = TRUE)
+roc_sofa_b <- roc(sofa_b$death, sofa_b$SOFA, levels = c("0", "1"), direction = "<", quiet = TRUE)
+roc_sofa_c <- roc(sofa_c$death, sofa_c$SOFA, levels = c("0", "1"), direction = "<", quiet = TRUE)
+
+# slide 63: stratified bootstrap 95% CI (lower, AUROC, upper)
+ci_saps_b <- ci.auc(roc_saps_b, method = "bootstrap", boot.n = 2000)
+ci_saps_c <- ci.auc(roc_saps_c, method = "bootstrap", boot.n = 2000)
+ci_sofa_b <- ci.auc(roc_sofa_b, method = "bootstrap", boot.n = 2000)
+ci_sofa_c <- ci.auc(roc_sofa_c, method = "bootstrap", boot.n = 2000)
+
+auc_bench_tbl <- tibble(
+  Score = c("SAPS-I", "SAPS-I", "SOFA", "SOFA"),
+  Set   = c("set-b", "set-c", "set-b", "set-c"),
+  AUROC = c(as.numeric(auc(roc_saps_b)), as.numeric(auc(roc_saps_c)),
+            as.numeric(auc(roc_sofa_b)), as.numeric(auc(roc_sofa_c))),
+  Lower = c(ci_saps_b[1], ci_saps_c[1], ci_sofa_b[1], ci_sofa_c[1]),
+  Upper = c(ci_saps_b[3], ci_saps_c[3], ci_sofa_b[3], ci_sofa_c[3])
+)
+auc_bench_tbl
+```
+### 3.2.2 AUROC Comparison 
+It seems when comparing both set-b and set-c to our mean CV from set-a (in checkpoint 2) the set-b/set-c AUROC seem to be higher leading to negative differences in both but by a small margin (~-0.02). When we run the ROC test to compare the two sets we find a p-value greater than 0.05 (p = 0.835) indicating no evidence of a difference between set-b and set-c with a noted difference of -0.002 between the two sets which is quite low. Looking at table 2 we can see how set-b and set-c over perform from our set-a from the early checkpoint which was not what I expected, and since set-b and set-c were never used to fit or tune the model their estimates are not optimistic, so we do not need to correct for them. Looking at set-b and set-c I am surprised how similar the two performed given they are two separate datasets but show such small difference AUROC 0.865 and 0.868 with a p-value from the ROC test of p = 0.835 indicating no evidence of a difference between the two.
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: compare_auroc
+
+oof <- fread(file.path(out_dir, "cp2_oof_predictions.csv")) |>
+  filter(model == "LogReg") |>
+  mutate(death = factor(death, levels = c(1, 0)))   # same factor coding as CP2
+
+cv_folds <- oof |>
+  group_by(fold) |>
+  roc_auc(death, .pred_1)
+
+cv_mean <- mean(cv_folds$.estimate)
+cv_sd   <- sd(cv_folds$.estimate)
+cv_mean; cv_sd          # should match CP2: 0.843 and 0.021
+
+
+```
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 2: Cross-validation AUROC vs set-b and set-c"
+#| label: compare_auroc_table
+# comparison table: CI ends now come from the pROC bootstrap
+compare_tbl <- tibble(
+  Evaluation = c("CP2 5-fold CV (set-a)", "set-b", "set-c"),
+  AUROC      = c(cv_mean, auc_b, auc_c),
+  SD         = c(cv_sd, NA, NA),
+  `CI lower` = c(NA, ci_b[1], ci_c[1]),
+  `CI upper` = c(NA, ci_b[3], ci_c[3])
+)
+
+compare_ft <- flextable(compare_tbl) |>
+  colformat_double(digits = 3, na_str = "—") |>
+  set_caption("Table 2: Cross-validation AUROC vs set-b and set-c") |>
+  autofit()
+compare_ft
+```
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: compare_auroc_etc
+# to answer the short question 
+cv_mean - auc_b                 
+cv_mean - auc_c                 
+cv_sd                           
+roc.test(roc_b, roc_c, method = "delong", paired = FALSE)   # set-b vs set-c (different patients)
+
+```
+
+### 3.2.3 Precision Recall Curve Set-B
+
+In this plot we have our death rate in set-b set at 0.14 which is relatively low and none of the curve dips below that 0.14 threshold. At a low recall/sensitivity of around 0.1 (between 0 and 0.25), where we only flag those at true high risk (mostly TP relative to TP and FP), we see that PPV = 0.8, meaning a much higher proportion of the patients we flag actually have the event (even though we are only catching ~10% of all deaths). In contrast, if we increase sensitivity past ~0.60 to catch more of the deaths, PPV drops to around 0.5 or less, meaning half or more of the flagged patients do not actually have the event. Because deaths are small (~14%) and most patients are survivors, the PR curve directly shows this trade-off between catching more deaths (higher sensitivity) and having the flagged patients actually die (higher PPV).
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: figure1
+# death rate in set-b = the baseline (a model with no skill)
+prev_b <- mean(setb_preds$death == "1")
+prev_b
+
+# PR curve (death level "1" is the first level, so it is the event, same as CP2)
+pr_b <- setb_preds |> pr_curve(death, .pred_1)
+
+# area under the PR curve, to report next to the AUROC
+setb_preds |> pr_auc(death, .pred_1)
+
+pr_plot_b <- ggplot(pr_b, aes(x = recall, y = precision)) +
+  geom_path() +
+  geom_hline(yintercept = prev_b, linetype = "dashed") +
+  ylim(0, 1) +
+  labs(
+    x = "Recall (sensitivity)",
+    y = "Precision (positive predictive value)",
+    title = "Figure 1: Precision-Recall Curve, Set-b",
+    caption = "Dashed line = death rate in set-b (baseline)"
+  ) +
+  theme_bw()
+pr_plot_b
+ggsave(
+  filename = "pr_curve_setb.png",
+  plot = pr_plot_b,
+  path = out_dir,
+  width = 6, height = 5, dpi = 300
+)
+```
+
+## 3.3 Calibration 
+
+Looking at set-b first, the calibration intercept is very close to zero at a = -0.021 (95% CI: -0.125 to 0.082), with the confidence interval including 0, while the slope is b = 1.097 (95% CI: 1.009 to 1.184), just above 1 (slope may be too timid, just slightly). Looking at the plot, set-b deviates slightly above the reference line in the middle and is slightly over at ~0.75 predicted risk of death which could be explained by not so much data there given wider CI indicating low precision. Similarly, set-c shows strong overall calibration with a = 0.017 (95% CI: -0.086 to 0.120) and b = 1.031 (95% CI: 0.949 to 1.113), both including their ideal values (0 and 1), while the curve shows mild under prediction of the event in the lower to middle part of the plot and similar to set b some wide CI at the end with the line above the diagonal reference due to sparse data. Because the deviations in the slope on set-b is small and the confidence bands largely overlap the diagonal, recalibration is likely not needed, but if we were to do so we would start at Stage 1 (intercept) and move to Stage 2 (slope), which would leave AUROC unchanged. 
+
+Looking at our Brier score which includes calibration and discrimination (calibration error - resolution + uncertainty), the model shows a Brier score of 0.087 (scaled Brier 0.284) on set-b and 0.091 (scaled Brier 0.269) on set-c, improving about 27–28% over predicting the baseline prevalence alone.
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: calibration_results
+
+y_b  <- as.integer(setb_preds$death == "1")
+y_c  <- as.integer(setc_preds$death == "1")
+lp_b <- qlogis(setb_preds$.pred_1)
+lp_c <- qlogis(setc_preds$.pred_1)
+
+# predictions range 
+range(setb_preds$.pred_1)
+range(setc_preds$.pred_1)
+
+# calibration intercept 
+int_b <- glm(y_b ~ offset(lp_b), family = binomial)
+int_c <- glm(y_c ~ offset(lp_c), family = binomial)
+
+# calibration slope
+slope_b <- glm(y_b ~ lp_b, family = binomial)
+slope_c <- glm(y_c ~ lp_c, family = binomial)
+
+# 95% CIs wald
+ci_int_b   <- confint.default(int_b)
+ci_int_c   <- confint.default(int_c)
+ci_slope_b <- confint.default(slope_b)["lp_b", ]
+ci_slope_c <- confint.default(slope_c)["lp_c", ]
+
+
+```
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 3: Calibration intercept and slope on set-b and set-c"
+#| label: calibration_results_tab
+cal_tbl <- tibble(
+  Set = c("set-b", "set-c"),
+  Intercept = c(coef(int_b)[1], coef(int_c)[1]),
+  `Int lower` = c(ci_int_b[1], ci_int_c[1]),
+  `Int upper` = c(ci_int_b[2], ci_int_c[2]),
+  Slope = c(coef(slope_b)["lp_b"], coef(slope_c)["lp_c"]),
+  `Slope lower` = c(ci_slope_b[1], ci_slope_c[1]),
+  `Slope upper` = c(ci_slope_b[2], ci_slope_c[2])
+)
+
+cal_ft <- flextable(cal_tbl) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 3: Calibration intercept and slope on set-b and set-c") |>
+  autofit()
+cal_ft
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: figure2
+
+# stack both sets so one plot shows them side by side
+cal_dat <- bind_rows(
+  tibble(Set = "set-b", pred = setb_preds$.pred_1, y = as.integer(setb_preds$death == "1")),
+  tibble(Set = "set-c", pred = setc_preds$.pred_1, y = as.integer(setc_preds$death == "1"))
+)
+
+cal_plot <- ggplot(cal_dat, aes(x = pred, y = y)) +
+  geom_abline(slope = 1, intercept = 0, color = "gray50") +        # perfect calibration
+  geom_smooth(method = "loess", se = TRUE, level = 0.95,           # loess curve + 95% band
+              color = "#1f77b4", fill = "#1f77b4", alpha = 0.2) +
+  geom_rug(sides = "b", alpha = 0.1) +                             # distribution of predicted risks
+  facet_wrap(~ Set) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(
+    x = "Predicted risk of death",
+    y = "Observed death rate",
+    title = "Figure 2: Flexible Calibration Curves, Set-b and Set-c"
+  ) +
+  theme_bw()
+cal_plot
+ggsave(
+  filename = "calibration_curves.png",
+  plot = cal_plot,
+  path = out_dir,
+  width = 9, height = 5, dpi = 300
+)
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 4: Brier and scaled Brier score on set-b and set-c"
+#| label: predictions 
+set.seed(707)    # same seed as slide 63, forgot to carry seed from before but will keep 707 here to not chagne results and write up
+
+# Brier score = mean squared difference between predicted risk and the 0/1 outcome (slide 5)
+p_b <- setb_preds$.pred_1
+p_c <- setc_preds$.pred_1
+brier_b <- mean((y_b - p_b)^2)
+brier_c <- mean((y_c - p_c)^2)
+
+# scaled Brier = 1 - Brier / Brier_max, where Brier_max = prevalence * (1 - prevalence) (slide 6)
+prev_b <- mean(y_b)
+prev_c <- mean(y_c)
+scaled_b <- 1 - brier_b / (prev_b * (1 - prev_b))
+scaled_c <- 1 - brier_c / (prev_c * (1 - prev_c))
+
+# slide 63: bootstrap the test set, model fixed (2000 resamples)
+brier_boot_b <- replicate(2000, {
+  i <- sample(length(y_b), replace = TRUE)
+  mean((y_b[i] - p_b[i])^2)
+})
+brier_boot_c <- replicate(2000, {
+  i <- sample(length(y_c), replace = TRUE)
+  mean((y_c[i] - p_c[i])^2)
+})
+
+# scaled Brier is recomputed inside each resample because prevalence changes with the resample
+scaled_boot_b <- replicate(2000, {
+  i <- sample(length(y_b), replace = TRUE)
+  1 - mean((y_b[i] - p_b[i])^2) / (mean(y_b[i]) * (1 - mean(y_b[i])))
+})
+scaled_boot_c <- replicate(2000, {
+  i <- sample(length(y_c), replace = TRUE)
+  1 - mean((y_c[i] - p_c[i])^2) / (mean(y_c[i]) * (1 - mean(y_c[i])))
+})
+
+brier_tbl <- tibble(
+  Set = c("set-b", "set-c"),
+  `Death rate` = c(prev_b, prev_c),
+  Brier = c(brier_b, brier_c),
+  `Brier lower` = c(quantile(brier_boot_b, 0.025), quantile(brier_boot_c, 0.025)),
+  `Brier upper` = c(quantile(brier_boot_b, 0.975), quantile(brier_boot_c, 0.975)),
+  `Scaled Brier` = c(scaled_b, scaled_c),
+  `Scaled lower` = c(quantile(scaled_boot_b, 0.025), quantile(scaled_boot_c, 0.025)),
+  `Scaled upper` = c(quantile(scaled_boot_b, 0.975), quantile(scaled_boot_c, 0.975))
+)
+
+brier_ft <- flextable(brier_tbl) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 4: Brier and scaled Brier score on set-b and set-c") |>
+  autofit()
+brier_ft
+```
+
+## 3.4 Clinical Usefulness 
+
+For clinical usefulness I chose a threshold of 0.25 which lies right between 0.1 and 0.4 like in the slides from week 10. This threshold can be important towards trying to enact closer ICU monitoring for high-risk patients even if it means capturing a few not high risk.oh. The figure below shows the evaluation of net benefit across plausible values of p which I chose as 0.25 for threshold. At that point in the plot the model shows the best net benefit compared to SOFA and treat all and treat none, which is expected. Treat all interestingly drops down drastically below net benefit entering into harm before 0.4 p threshold, while SOFA and treat none zero out as p threshold increases. Our model performs best consistently across. Now based upon information from set-a and what we learned in class I chose a pt = 0.25 to flag those at high risk of death. The table below showcases sensitivity for set-b at 0.636 and PPV = 0.490 where in the challenge 2012 event 1 score had 0.490. We flag 18.4 (round down to 18) people per 100 persons for the event. Similarly set-c has sensitivity of 0.598, PPV 0.482 and flags 18.2 per 100 patients with event 1 score of 0.482. These results with our threshold reflect better net benefit than SOFA/treat all/treat none. 
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: figure3
+
+# using code from lside 58 in lecture 9 note
+p_b    <- setb_preds$.pred_1
+y_b    <- as.integer(setb_preds$death == "1")
+n_b    <- length(y_b)
+prev_b <- mean(y_b)
+
+thresholds <- seq(0.05, 0.60, by = 0.01)     
+nb_model <- numeric(length(thresholds))
+nb_all   <- numeric(length(thresholds))
+
+for (i in seq_along(thresholds)) {
+  pt   <- thresholds[i]
+  flag <- p_b >= pt                         
+  tp   <- sum(flag & y_b == 1)
+  fp   <- sum(flag & y_b == 0)
+  nb_model[i] <- tp / n_b - (fp / n_b) * (pt / (1 - pt))
+  nb_all[i]   <- prev_b - (1 - prev_b) * (pt / (1 - pt))     # treat all (slide 59 example)
+}
+# AI help here mostly
+# --- SOFA is a score, not a risk, so map it to a risk first ---
+# the map is fit on set-a only (not set-b), so nothing is tuned on set-b
+seta_sofa <- fread(file.path(out_dir, "set-a_wide.csv")) |>
+  select(death = `In-hospital_death`, SOFA) |>
+  filter(!is.na(SOFA))
+sofa_glm <- glm(death ~ SOFA, family = binomial, data = seta_sofa)
+
+sofa_b <- setb_bench |> filter(!is.na(SOFA))          # same SOFA patients as in 3.2
+p_sofa <- predict(sofa_glm, newdata = data.frame(SOFA = sofa_b$SOFA), type = "response")
+y_sofa <- as.integer(sofa_b$death == "1")
+n_sofa <- length(y_sofa)
+
+nb_sofa <- numeric(length(thresholds))
+for (i in seq_along(thresholds)) {
+  pt   <- thresholds[i]
+  flag <- p_sofa >= pt
+  tp   <- sum(flag & y_sofa == 1)
+  fp   <- sum(flag & y_sofa == 0)
+  nb_sofa[i] <- tp / n_sofa - (fp / n_sofa) * (pt / (1 - pt))
+}
+
+dca_dat <- tibble(
+  threshold = rep(thresholds, 4),
+  nb = c(nb_model, nb_sofa, nb_all, rep(0, length(thresholds))),
+  Strategy = rep(c("Model", "SOFA", "Treat all", "Treat none"), each = length(thresholds))
+)
+
+dca_plot <- ggplot(dca_dat, aes(x = threshold, y = nb, color = Strategy)) +
+  annotate("rect", xmin = 0.10, xmax = 0.40, ymin = -Inf, ymax = Inf, alpha = 0.1) +   # stated range
+  geom_line() +
+  coord_cartesian(ylim = c(-0.05, 0.15)) +
+  labs(
+    x = "Risk threshold",
+    y = "Net benefit",
+    title = "Figure 3: Decision Curve, Set-b",
+    caption = "Shaded: stated threshold range 0.10 to 0.40"
+  ) +
+  theme_bw()
+dca_plot
+ggsave(
+  filename = "dca_setb.png",
+  plot = dca_plot,
+  path = out_dir,
+  width = 7, height = 5, dpi = 300
+)
+
+n_sofa      # patients used for the SOFA curve
+prev_b      # set-b death rate
+```
+
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: threshold_clinicaluse
+
+
+p_oof <- oof$.pred_1                        # oof from early chunk
+y_oof <- as.integer(oof$death == "1")
+
+cand <- seq(0.10, 0.50, by = 0.05)
+grid_tbl <- tibble(
+  Threshold = cand,
+  Sensitivity = NA_real_, PPV = NA_real_, `Flagged per 100` = NA_real_, `Event 1 score` = NA_real_
+)
+for (i in seq_along(cand)) {
+  flag <- p_oof >= cand[i]
+  tp <- sum(flag & y_oof == 1)
+  fp <- sum(flag & y_oof == 0)
+  fn <- sum(!flag & y_oof == 1)
+  grid_tbl$Sensitivity[i]       <- tp / (tp + fn)
+  grid_tbl$PPV[i]               <- tp / (tp + fp)
+  grid_tbl$`Flagged per 100`[i] <- 100 * mean(flag)
+  grid_tbl$`Event 1 score`[i]   <- min(tp / (tp + fn), tp / (tp + fp))
+}
+grid_tbl
+
+
+thr <- 0.25 # I chose this as the middle between 0.1 and 0.4 as suggest in the slides
+
+
+p_b <- setb_preds$.pred_1;  y_b <- as.integer(setb_preds$death == "1")
+p_c <- setc_preds$.pred_1;  y_c <- as.integer(setc_preds$death == "1")
+
+flag_b <- p_b >= thr
+flag_c <- p_c >= thr
+
+tp_b <- sum(flag_b & y_b == 1);  fp_b <- sum(flag_b & y_b == 0);  fn_b <- sum(!flag_b & y_b == 1)
+tp_c <- sum(flag_c & y_c == 1);  fp_c <- sum(flag_c & y_c == 0);  fn_c <- sum(!flag_c & y_c == 1)
+
+```
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 5: Performance at the chosen threshold"
+#| label: threshold_clinicaluse_tab
+use_tbl <- tibble(
+  Set = c("set-b", "set-c"),
+  Threshold = thr,
+  Sensitivity = c(tp_b / (tp_b + fn_b), tp_c / (tp_c + fn_c)),
+  PPV = c(tp_b / (tp_b + fp_b), tp_c / (tp_c + fp_c)),
+  `Flagged per 100` = c(100 * mean(flag_b), 100 * mean(flag_c)),
+  `Event 1 score` = c(min(tp_b / (tp_b + fn_b), tp_b / (tp_b + fp_b)),
+                      min(tp_c / (tp_c + fn_c), tp_c / (tp_c + fp_c)))
+)
+
+use_ft <- flextable(use_tbl) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 5: Performance at the chosen threshold") |>
+  autofit()
+use_ft
+```
+
+## 3.5 Subgroup Analysis 
+
+I created two tables here: alongside the calibration and intercept summary, the second table summarizes subgroup AUROCs using bootstrap CIs and adjusted confidence intervals across all 8 subgroup comparisons. From these we can see some interesting patterns which make sense, such as individuals who are older (65+) being our largest subgroup with the highest death count at 391 deaths and an intercept closest to 0 (a = -0.004), while the Cardiac Surgery Recovery Unit subgroup has the farthest intercept from 0 (a = -0.257), which could point to possible miscalibration, though the 95% CI includes 0 (-0.644 to 0.129) and out of 782 stays only 34 had the event (4.3%, well under 10%). For discrimination, males (2,253 stays, AUROC 0.867) and Surgical ICU patients (1,192 stays, AUROC 0.876) show higher AUROCs than females (0.865) or Medical ICU patients (0.829), and patients under 65 reach 0.888 compared with 0.841 in the 65+ group. Additionally, the AUROC for each subgroup is quite similar to our overall 0.866 AUROC for set-b. After applying a Bonferroni correction for multiple testing across the 8 comparisons so differences due to chance are accounted for (so don't misinterpret significant p-values which cna be dueto chance), the adjusted AUROC intervals across all subgroups overlap or closely align with the overall set-b AUROC, indicating no differences large enough to matter.  
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 6: AUROC and calibration-in-the-large by subgroup, set-b"
+#| label: subgroups
+
+# subrougp of age, gender and ICU type
+sub_dat <- setb_preds |>
+  mutate(
+    y  = as.integer(death == "1"),
+    lp = qlogis(.pred_1),                                   
+    AgeGroup = cut(Age, breaks = c(0, 65,  Inf), right = FALSE,
+                   labels = c("<65", "65+"))
+  )
+
+# stack the three groupings into one table: Variable + Subgroup
+sub_long <- bind_rows(
+  sub_dat |> filter(!is.na(AgeGroup)) |> mutate(Variable = "Age group", Subgroup = as.character(AgeGroup)),
+  sub_dat |> filter(!is.na(Gender))   |> mutate(Variable = "Sex",       Subgroup = as.character(Gender)),
+  sub_dat |> filter(!is.na(ICUType))  |> mutate(Variable = "ICU type",  Subgroup = as.character(ICUType))
+) |>
+  mutate(
+    Variable = factor(Variable, levels = c("Age group", "Sex", "ICU type")),
+    Subgroup = factor(Subgroup, levels = c("<65", "65+", "Female", "Male", levels(sub_dat$ICUType)))
+  )
+
+# one row per subgroup: size, deaths, AUROC, calibration-in-the-large (offset glm, same as 3.3)
+sub_tbl <- sub_long |>
+  group_by(Variable, Subgroup) |>
+  summarise(
+    Stays  = n(),
+    Deaths = sum(y),
+    `Death rate (%)`     = round(100 * mean(y), 1),
+    `Mean predicted (%)` = round(100 * mean(.pred_1), 1),
+    AUROC       = roc_auc_vec(death, .pred_1),
+    Intercept   = unname(coef(glm(y ~ offset(lp), family = binomial))[1]),
+    `Int lower` = confint.default(glm(y ~ offset(lp), family = binomial))[1, 1],
+    `Int upper` = confint.default(glm(y ~ offset(lp), family = binomial))[1, 2],
+    .groups = "drop"
+  )
+
+sub_ft <- flextable(sub_tbl) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 6: AUROC and calibration-in-the-large by subgroup, set-b") |>
+  autofit()
+sub_ft
+
+ 
+```
+
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: subgroup_ci
+
+set.seed(1234)
+
+# one row per subgroup, taken from Table 12
+combos <- sub_tbl |> select(Variable, Subgroup)
+n_comp <- nrow(combos)                       # number of subgroups compared (age 4 + sex 2 + ICU 4 = 10)
+adj_level <- 1 - 0.05 / n_comp               # Bonferroni: 0.995 when there are 10 comparisons
+
+ci_lo <- numeric(n_comp); ci_hi <- numeric(n_comp)
+adj_lo <- numeric(n_comp); adj_hi <- numeric(n_comp)
+
+for (i in seq_len(n_comp)) {
+  d <- sub_long |> filter(Variable == combos$Variable[i], Subgroup == combos$Subgroup[i])
+  r <- roc(d$y, d$.pred_1, levels = c(0, 1), direction = "<", quiet = TRUE)
+  ci_95  <- ci.auc(r, method = "bootstrap", boot.n = 1000)
+  ci_adj <- ci.auc(r, method = "bootstrap", boot.n = 1000, conf.level = adj_level)
+  ci_lo[i]  <- ci_95[1];  ci_hi[i]  <- ci_95[3]
+  adj_lo[i] <- ci_adj[1]; adj_hi[i] <- ci_adj[3]
+}
+
+sub_ci_tbl <- sub_tbl |>
+  select(Variable, Subgroup, Stays, Deaths, AUROC) |>
+  mutate(
+    `AUROC - overall` = AUROC - auc_b,          # auc_b = set-b AUROC from 3.2
+    `95% lower` = ci_lo,  `95% upper` = ci_hi,
+    `Adjusted lower` = adj_lo, `Adjusted upper` = adj_hi
+  )
+
+
+n_comp      # how many comparisons you made
+auc_b       # overall set-b AUROC for reference
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 7: Subgroup AUROC with 95% and multiplicity-adjusted bootstrap intervals, set-b"
+#| label: subgroup_ci_tab
+sub_ci_ft <- flextable(sub_ci_tbl) |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 7: Subgroup AUROC with 95% and multiplicity-adjusted bootstrap intervals, set-b") |>
+  autofit()
+sub_ci_ft
+```
+
+
+## 3.6 Interpretation 
+
+To see predictors that drive our model we look at log-odds of the outcome death based upon our logistic regression model we chose. From this we can observe that in prediction as a whole important predictors like Age are only risk factors that are ranked with the outcome. It does not account for exposure and non-exposure groups or covariate balancing or estimating an effect; we are simply pointing out covariates that predict death, like in this instance. In our case our plot which I outputted 20 variables shows these as our top 5 covariates: LAst recorded GCS, Age, missing indicators for MechVent, Respiratory Rate, and mean pH,. These can reflect interesting changes in our study population such as those who did not have a recorded Respiratory Rate may have been critical cases which could explain higher risk of death while those who are older especially with an older population are more likely to be in poorer health and such may experience death greater than younger individuals. Or on the other side the last recorded GCS is associated with lower odds of mortality. Also, as I learned in the causal inference course, prediction is used when positivity is not met (such that not everyone has a non-zero probability of receiving a treatment) but we can use prediction analyses to assess risk factors associated with the outcome of interest, but we cannot extrapolate those results into a causal framework because we cannot create valid pseudo-populations or emulate a randomized trial where everyone could realistically be treated. I did not choose my tree ensemble as my final model so I did not include SHAP plot here. 
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| results: 'hide'
+#| label: coefficients_rank
+
+# coefficients from the saved final model (non-zero ones only)
+coef_all <- extract_fit_parsnip(final_seta) |>
+  tidy() |>
+  filter(term != "(Intercept)", estimate != 0)
+
+nrow(coef_all)    # number of predictors kept (CP2 reported about 100)
+
+# glmnet models the log-odds of SURVIVAL (level "0"), so flip the sign to get the log-odds of DEATH
+# predictors were standardized in the recipe, so each is per 1 SD and sizes are comparable
+coef_tbl <- coef_all |>
+  mutate(
+    log_odds_death = -estimate,
+    odds_ratio     = exp(-estimate)
+  ) |>
+  arrange(desc(abs(log_odds_death)))
+
+# top 20 by absolute size
+coef_top <- coef_tbl |> slice_head(n = 20)
+
+coef_plot <- ggplot(coef_top, aes(x = log_odds_death, y = reorder(term, log_odds_death),
+                                  fill = log_odds_death > 0)) +
+  geom_col() +
+  scale_fill_manual(values = c("TRUE" = "firebrick", "FALSE" = "steelblue"),
+                    labels = c("TRUE" = "Higher risk of death", "FALSE" = "Lower risk of death"),
+                    name = NULL) +
+  labs(
+    x = "Log-odds of death per 1 SD increase (standardized)",
+    y = NULL,
+    title = "Figure 4: Top 20 Predictors by Coefficient Size, Final Model"
+  ) +
+  theme_bw()
+coef_plot
+ggsave(
+  filename = "top_coefficients.png",
+  plot = coef_plot,
+  path = out_dir,
+  width = 8, height = 6, dpi = 300
+)
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 8: Top 20 predictors, final model (per 1 SD, death direction)"
+#| label: coefficients_tab
+coef_ft <- coef_top |>
+  select(Predictor = term, `Log-odds of death` = log_odds_death, `Odds ratio` = odds_ratio) |>
+  flextable() |>
+  colformat_double(digits = 3) |>
+  set_caption("Table 8: Top 20 predictors, final model (per 1 SD, death direction)") |>
+  autofit()
+coef_ft
+```
+
+## 3.7 Most Confident Mistakes
+
+
+Now we assess cases where we saw high predicted risks for certain individuals but then find that they survived and vice versa someone died when their risk was quite low. In my search I found that missingness was not too great with around 12-14 being the max counted missingness in the 10 mistake cases I found. Among those with high risk and survived (0.8+ predicted risk), GCS_last and older individuals and severe lab abnormalities like extreme values may be contributing to this mistake as it showed positive contributions. Issues of multicollinearity or limitation of the model may be at play here. For those with low risk and death, GCS_last led to negative contribution (mostly) and age in some places and out of those 5, 3 were in cardiac surgery unit, which may be a limitation that limiting to 48 hours may not capture issues that may lead to death later on.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| include: false
+#| label: mistakes1
+
+
+fp_ids <- setb_preds |>
+  filter(death == "0") |>                       # survived
+  arrange(desc(.pred_1)) |>                     # highest predicted risk first
+  slice_head(n = 5) |>
+  mutate(Type = "Survived, highest predicted risk")
+
+fn_ids <- setb_preds |>
+  filter(death == "1") |>                       # died
+  arrange(.pred_1) |>                           # lowest predicted risk first
+  slice_head(n = 5) |>
+  mutate(Type = "Died, lowest predicted risk")
+
+mistakes <- bind_rows(fp_ids, fn_ids) |>
+  select(RecordID, Type, Predicted_risk = .pred_1)
+
+# not printing this as the other table from gemini gave a much better sumary table then claude. 
+
+# ---- what drove each prediction ----
+# preprocessed set-b (set-a medians and scaling), so 0 = the average set-a patient
+baked_b <- bake(extract_recipe(final_seta), new_data = setb_model)
+baked_b$RecordID <- setb_model$RecordID
+
+# contribution to the log-odds of DEATH = -(glmnet coefficient) x (standardized value)
+# positive pushes the predicted risk up, negative pushes it down
+drivers <- baked_b |>
+  filter(RecordID %in% mistakes$RecordID) |>
+  pivot_longer(-c(RecordID, death), names_to = "term", values_to = "std_value") |>
+  inner_join(coef_all |> select(term, estimate), by = "term") |>
+  mutate(contribution = -estimate * std_value) |>
+  group_by(RecordID) |>
+  slice_max(abs(contribution), n = 5, with_ties = FALSE) |>
+  ungroup()
+
+# raw (unscaled) values for those drivers, to spot implausible values
+raw_vals <- setb_model |>
+  filter(RecordID %in% mistakes$RecordID) |>
+  select(RecordID, any_of(unique(drivers$term))) |>
+  pivot_longer(-RecordID, names_to = "term", values_to = "raw_value")
+
+drivers_tbl <- drivers |>
+  left_join(raw_vals, by = c("RecordID", "term")) |>
+  left_join(mistakes |> select(RecordID, Type), by = "RecordID") |>
+  select(Type, RecordID, term, raw_value, std_value, contribution) |>
+  arrange(Type, RecordID, desc(abs(contribution)))
+
+# how many tests were never recorded for each of these patients (heavy missingness check)
+n_missing_tbl <- setb_model |>
+  filter(RecordID %in% mistakes$RecordID) |>
+  transmute(RecordID, n_missing_tests = rowSums(across(ends_with("_missing"))))
+
+drivers_tbl |> print(n = 50)
+n_missing_tbl
+
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Table 9: Top 3 predictors and missing test counts for the 10 most confident mistakes on set-b"
+#| label: mistakes2
+# turning the two outputs above missing and drivers tbl into a flextable for better reporting
+# used gemini web interface for support
+drivers_summary_tbl <- drivers_tbl |>
+  group_by(Type, RecordID) |>
+  slice_max(abs(contribution), n = 3, with_ties = FALSE) |>
+  summarise(
+    `Top 3 predictors (raw value; log-odds contrib)` = paste0(
+      term, " (",
+      ifelse(is.na(raw_value), "indicator", round(raw_value, 1)),
+      "; ", sprintf("%+.2f", contribution), ")",
+      collapse = "; "
+    ),
+    .groups = "drop"
+  ) |>
+  left_join(mistakes, by = c("Type", "RecordID")) |>
+  left_join(n_missing_tbl, by = "RecordID") |>
+  select(
+    Type,
+    RecordID,
+    `Predicted risk` = Predicted_risk,
+    `Missing tests` = n_missing_tests,
+    `Top 3 predictors (raw value; log-odds contrib)`
+  ) |>
+  arrange(Type, desc(`Predicted risk`))
+
+drivers_summary_ft <- flextable(drivers_summary_tbl) |>
+  colformat_double(j = "RecordID", digits = 0, big.mark = "") |>
+  colformat_double(j = "Predicted risk", digits = 3) |>
+  set_caption("Table 9: Top 3 predictors and missing test counts for the 10 most confident mistakes on set-b") |>
+  autofit()
+drivers_summary_ft
+```
+
+
+## 3.8 Final consdierations
+
+### 3.8.1 Clincal Usefulness 
+
+Yes, I would recommend this model for flagging patients at p_t = 0.25 for clinical practice and decision support. On set-b, where the baseline death rate was 14%, our elastic net logistic regression model outperformed SOFA, treat all, and treat none in net benefit by a great margin and showcased good and optimistic performance with AUROC from our model (AUROC = 0.865). Set-b flagged 18 per 100 patients with PPV around 0.48–0.49; however, because sensitivity at p_t = 0.25 is ~0.60–0.64, clinical judgment is still needed for patients below the cutoff as we only account for around 60-64% who actually have the event, missing up to potentially ~40%.
+
+### 3.8.2 Limitations
+
+We rely on a single ICU data source (MIMIC-II) with low generalizability to other populations as the dataset for the challenge comes from one hospital ICU and a restricted 48-hour observation window which we cannot capture any other information due to letting in leakage. This means any deterioration that occurs further down may not be accounted for, which we saw as possible reasoning in section 3.7. Similarly, we experienced substantial missingness, and our cleaning decisions on extreme values created additional missingness while still leaving some outliers mostly due to not having knowledge of ICU data and domain clinical knowledge, such as cases of individuals with greater weight than expected or high scores of some tests; these were avoided in some cases to potentially avoid removing informational data related to predicting death.
+
+### 3.8.3 Leakae Risk
+
+Leakage could enter at especially my clean up point of set-b and set-c if I did not properly clean the data and apply same procedure from the final model like imputation and such as that would lead to misspecification and inaccurate biased results. Also applying same clean up allowed for transferable and translatable results that tie into the data the model based off of. My design prevents this with the proper and carried over cleaning code from past checkpoints.
+
+### 3.8.4 Causality
+
+No covariate should be read causally here, because we do not create the conditions needed to estimate causal effects (such as defining treatment/exposure groups, balancing covariates, or satisfying positivity). All we are doing is identifying risk factors that predict the event of interest like in this case, in-hospital death, such as monitoring indicators like GCS_count or MechVent_missing, so we cannot infer causality.
+
+
+# AI Disclosure
+
+Claude and Gemini web interfaces were utilized in this project. Compared to past checkpoints, I relied on Claude for code quite a bit while comparing to lecture notes, as many things I had no clue how to get from code—such as implementing preprocessing and imputation from my model onto set-b and set-c, and then displaying tables—so it became quite helpful. I will say that AI helped in making the process smoother, but it may hinder my full comprehension of the concepts we covered in the course. That is why I also used it to supplement and explain my confusion in ideas, especially with the PPV table, which helped clarify ideas, and with comparison to the lecture slides I was able to better understand the results of my final model on set-b and set-c. AI was also used as a spell-checking tool and a way to point out errors in my write-up that may be contradictory, helping me stay consistent with concepts we learned and provide a clear, cohesive report.
+
+
+
+
+
