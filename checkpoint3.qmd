@@ -31,23 +31,7 @@ data_dir <- here::here("data")
 out_dir  <- here::here("output")
 dir.create(out_dir, showWarnings = FALSE)
 expected_n <- 4000
-# code loading
-check_set_a <- function() {
-  # data/set-a/ and data/Outcomes-a.txt must already be in place
-  stopifnot("data/Outcomes-a.txt is missing" =
-              file.exists(file.path(data_dir, "Outcomes-a.txt")))
-  n <- length(list.files(file.path(data_dir, "set-a"), pattern = "\\.txt$"))
-  stopifnot("data/set-a does not have 4000 records" = n == expected_n)
-}
 
-outcomes <- fread(file.path(data_dir, "Outcomes-a.txt"))
-stopifnot(nrow(outcomes) == expected_n)
-
-# outcome b 
-outcomes_b <- fread(file.path(data_dir, "Outcomes-b.txt"))
-stopifnot(nrow(outcomes_b) == expected_n)
-
-# NEW: load the saved model from CP2 (do not refit)
 final_seta <- readRDS(file.path(out_dir, "cp2_final_model.rds"))
 
 files <- list.files(file.path(data_dir, "set-b"), full.names = TRUE)
@@ -60,9 +44,6 @@ for(i in seq_along(files)) {
 
 setb_long <- rbindlist(setb_list, use.names = TRUE, fill = FALSE, idcol = NULL, ignore.attr = FALSE)
 
-# outcomes for set-c (same as set-b, file name changed)
-outcomes_c <- fread(file.path(data_dir, "Outcomes-c.txt"))
-stopifnot(nrow(outcomes_c) == expected_n)
 
 # load the 4000 set-c files
 files <- list.files(file.path(data_dir, "set-c"), full.names = TRUE, pattern = "\\.txt$")
